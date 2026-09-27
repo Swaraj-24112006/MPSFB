@@ -702,9 +702,18 @@ class BOMCSVUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Safely read raw file bytes into memory upfront
+        if hasattr(file_obj, 'seek'):
+            try:
+                file_obj.seek(0)
+            except Exception:
+                pass
+        raw_bytes = file_obj.read() if hasattr(file_obj, 'read') else file_obj
+        raw_text = raw_bytes.decode('utf-8-sig', errors='replace') if isinstance(raw_bytes, bytes) else str(raw_bytes)
+
         # Upload file to MinIO / Local storage
         try:
-            minio_path = StorageService.upload_file(file_obj, f"bom_uploads/{file_name}")
+            minio_path = StorageService.upload_file(raw_bytes, f"bom_uploads/{file_name}")
         except Exception:
             minio_path = f"fallback/{file_name}"
 
@@ -719,9 +728,7 @@ class BOMCSVUploadView(APIView):
         )
 
         try:
-            # Read and decode CSV
-            file_obj.seek(0)
-            raw_text = file_obj.read().decode('utf-8-sig', errors='replace')
+            # Parse CSV from memory
             reader = csv.reader(io.StringIO(raw_text))
 
             rows = [r for r in reader if any(cell.strip() for cell in r)]
@@ -929,8 +936,17 @@ class VendorBuyerCSVUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Safely read raw file bytes into memory upfront
+        if hasattr(file_obj, 'seek'):
+            try:
+                file_obj.seek(0)
+            except Exception:
+                pass
+        raw_bytes = file_obj.read() if hasattr(file_obj, 'read') else file_obj
+        raw_text = raw_bytes.decode('utf-8-sig', errors='replace') if isinstance(raw_bytes, bytes) else str(raw_bytes)
+
         try:
-            minio_path = StorageService.upload_file(file_obj, f"vendor_uploads/{file_name}")
+            minio_path = StorageService.upload_file(raw_bytes, f"vendor_uploads/{file_name}")
         except Exception:
             minio_path = f"fallback/{file_name}"
 
@@ -944,8 +960,6 @@ class VendorBuyerCSVUploadView(APIView):
         )
 
         try:
-            file_obj.seek(0)
-            raw_text = file_obj.read().decode('utf-8-sig', errors='replace')
             reader = csv.reader(io.StringIO(raw_text))
 
             rows = [r for r in reader if any(cell.strip() for cell in r)]
@@ -1627,6 +1641,16 @@ class MB51BulkUploadView(APIView):
         file_name = file_obj.name if file_obj else f"mb51_pasted_{timezone.now().strftime('%Y%m%d_%H%M%S')}.csv"
         user_name = request.user.username if (request.user and request.user.is_authenticated) else 'system'
 
+        # Safely read raw file bytes into memory upfront to prevent stream exhaustion/closure
+        raw_bytes = None
+        if file_obj:
+            if hasattr(file_obj, 'seek'):
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
+            raw_bytes = file_obj.read() if hasattr(file_obj, 'read') else file_obj
+
         # 1. Create upload batch
         batch = UploadBatchService.create_batch(
             upload_type='MB51_REPORT',
@@ -1637,10 +1661,10 @@ class MB51BulkUploadView(APIView):
         # 2. Store file in MinIO / fallback
         try:
             storage_path = f"mb51_reports/{file_name}"
-            if file_obj:
-                minio_url = StorageService.upload_file(file_obj, path=storage_path)
+            if raw_bytes is not None:
+                minio_url = StorageService.upload_file(raw_bytes, path=storage_path)
             else:
-                text_bytes = io.BytesIO(csv_text.encode('utf-8'))
+                text_bytes = csv_text.encode('utf-8')
                 minio_url = StorageService.upload_file(text_bytes, path=storage_path)
             batch.minio_path = minio_url
             batch.save(update_fields=['minio_path'])
@@ -1655,7 +1679,7 @@ class MB51BulkUploadView(APIView):
             weeks = list(WeekDefinition.objects.all().order_by('start_date'))
 
         # 4. Parse content
-        content_to_parse = file_obj if file_obj else csv_text
+        content_to_parse = raw_bytes if raw_bytes is not None else csv_text
         parse_result = MB51Parser.parse(content_to_parse, weeks=weeks)
 
         valid_rows = parse_result.get('valid_rows', [])
@@ -1971,6 +1995,16 @@ class StockBulkUploadView(APIView):
         file_name = file_obj.name if file_obj else f"stock_pasted_{timezone.now().strftime('%Y%m%d_%H%M%S')}.csv"
         user_name = request.user.username if (request.user and request.user.is_authenticated) else 'system'
 
+        # Safely read raw file bytes into memory upfront to prevent stream exhaustion/closure
+        raw_bytes = None
+        if file_obj:
+            if hasattr(file_obj, 'seek'):
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
+            raw_bytes = file_obj.read() if hasattr(file_obj, 'read') else file_obj
+
         # 1. Create upload batch
         batch = UploadBatchService.create_batch(
             upload_type='STOCK_REPORT',
@@ -1981,10 +2015,10 @@ class StockBulkUploadView(APIView):
         # 2. Store file in MinIO / fallback
         try:
             storage_path = f"stock_reports/{file_name}"
-            if file_obj:
-                minio_url = StorageService.upload_file(file_obj, path=storage_path)
+            if raw_bytes is not None:
+                minio_url = StorageService.upload_file(raw_bytes, path=storage_path)
             else:
-                text_bytes = io.BytesIO(csv_text.encode('utf-8'))
+                text_bytes = csv_text.encode('utf-8')
                 minio_url = StorageService.upload_file(text_bytes, path=storage_path)
             batch.minio_path = minio_url
             batch.save(update_fields=['minio_path'])
@@ -1992,7 +2026,7 @@ class StockBulkUploadView(APIView):
             logger.warning(f"Storage upload failed for stock batch #{batch.id}, continuing: {e}")
 
         # 3. Parse content
-        content_to_parse = file_obj if file_obj else csv_text
+        content_to_parse = raw_bytes if raw_bytes is not None else csv_text
         parse_result = StockParser.parse(content_to_parse)
 
         valid_rows = parse_result.get('valid_rows', [])

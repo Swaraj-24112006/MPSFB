@@ -93,6 +93,12 @@ async function handleResponse<T>(response: Response): Promise<T> {
   throw error;
 }
 
+function getUrl(path: string): string {
+  const cleanPath = path.startsWith('/') ? path.slice(1) : path;
+  const base = API_BASE_URL.endsWith('/') ? API_BASE_URL : `${API_BASE_URL}/`;
+  return `${base}${cleanPath}`;
+}
+
 /**
  * Core request function.
  */
@@ -102,7 +108,7 @@ async function request<T>(
   body?: unknown,
   queryParams?: Record<string, string>
 ): Promise<T> {
-  let url = `${API_BASE_URL}${path}`;
+  let url = getUrl(path);
   if (queryParams) {
     const params = new URLSearchParams();
     Object.entries(queryParams).forEach(([key, value]) => {
@@ -114,12 +120,18 @@ async function request<T>(
     if (qs) url += `?${qs}`;
   }
 
+  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
+  const headers = buildHeaders() as Record<string, string>;
+  if (isFormData) {
+    delete headers['Content-Type'];
+  }
+
   const options: RequestInit = {
     method,
-    headers: buildHeaders(),
+    headers,
   };
   if (body !== undefined) {
-    options.body = JSON.stringify(body);
+    options.body = isFormData ? (body as FormData) : JSON.stringify(body);
   }
 
   const response = await fetch(url, options);
@@ -150,7 +162,7 @@ export const api = {
   },
 
   async upload<T>(path: string, formData: FormData): Promise<T> {
-    const url = `${API_BASE_URL}${path}`;
+    const url = getUrl(path);
     const headers: Record<string, string> = {
       Accept: 'application/json',
     };

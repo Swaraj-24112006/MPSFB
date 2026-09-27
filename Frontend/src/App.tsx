@@ -186,7 +186,7 @@ export default function App() {
   useEffect(() => {
     bomService.listAll()
       .then((items) => {
-        if (items && items.length > 0) {
+        if (Array.isArray(items)) {
           setBoms(
             items.map((dto) => ({
               id: String(dto.id),
@@ -207,7 +207,7 @@ export default function App() {
 
     vendorBuyerService.listAll()
       .then((items) => {
-        if (items && items.length > 0) {
+        if (Array.isArray(items)) {
           setVendorBuyers(
             items.map((dto) => ({
               id: String(dto.id),
@@ -232,7 +232,7 @@ export default function App() {
     // Hydrate weeks from API
     weekService.list()
       .then((items) => {
-        if (items && items.length > 0) {
+        if (Array.isArray(items)) {
           setWeeks(items.map(dtoToFrontend));
         }
       })
@@ -241,7 +241,7 @@ export default function App() {
     // Hydrate monthly plans from API
     monthlyPlanService.getMonthlyPlans()
       .then((plans) => {
-        if (plans && plans.length > 0) {
+        if (Array.isArray(plans)) {
           setMonthlyPlans(plans);
         }
       })
@@ -250,7 +250,7 @@ export default function App() {
     // Hydrate MB51 transactions from API
     mb51Service.getTransactions()
       .then((txs) => {
-        if (txs && txs.length > 0) {
+        if (Array.isArray(txs)) {
           setMb51List(txs);
         }
       })

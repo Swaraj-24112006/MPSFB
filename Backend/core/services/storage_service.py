@@ -81,38 +81,49 @@ class StorageService:
         # Normalize relative path forward slashes
         clean_path = path.lstrip('/\\').replace('\\', '/')
 
-        # Ensure file pointer is at beginning
-        if hasattr(file_obj, 'seek'):
-            file_obj.seek(0)
-
         # Detect content type from file object if available
         if hasattr(file_obj, 'content_type') and file_obj.content_type:
             content_type = file_obj.content_type
+
+        # Extract content bytes safely so underlying file is never closed by boto3 or left exhausted
+        if isinstance(file_obj, bytes):
+            data_bytes = file_obj
+        elif hasattr(file_obj, 'read'):
+            if hasattr(file_obj, 'seek'):
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
+            data_bytes = file_obj.read()
+            if hasattr(file_obj, 'seek'):
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
+        else:
+            data_bytes = b''
 
         try:
             if not cls.ensure_bucket_exists(bucket):
                 logger.warning(
                     f"[StorageService] Bucket '{bucket}' unavailable. Falling back to local MEDIA storage."
                 )
-                return cls._fallback_local_upload(file_obj, clean_path)
+                return cls._fallback_local_upload(data_bytes, clean_path)
 
             client = cls.get_client()
-            extra_args = {'ContentType': content_type}
+            client.put_object(
+                Bucket=bucket,
+                Key=clean_path,
+                Body=data_bytes,
+                ContentType=content_type
+            )
 
-            if isinstance(file_obj, bytes):
-                client.put_object(
-                    Bucket=bucket,
-                    Key=clean_path,
-                    Body=file_obj,
-                    ContentType=content_type
-                )
-            else:
-                client.upload_fileobj(
-                    file_obj,
-                    bucket,
-                    clean_path,
-                    ExtraArgs=extra_args
-                )
+            # Ensure caller's file pointer remains at beginning if applicable
+            if hasattr(file_obj, 'seek'):
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
 
             logger.info(f"[StorageService] File uploaded successfully to s3://{bucket}/{clean_path}")
             return f"{bucket}/{clean_path}"
@@ -121,25 +132,33 @@ class StorageService:
             logger.warning(
                 f"[StorageService] MinIO unreachable or error ({err}). Falling back to local MEDIA storage."
             )
-            return cls._fallback_local_upload(file_obj, clean_path)
+            # Ensure caller's file pointer remains at beginning if applicable
+            if hasattr(file_obj, 'seek'):
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
+            return cls._fallback_local_upload(data_bytes, clean_path)
 
     @classmethod
-    def _fallback_local_upload(cls, file_obj: Union[BinaryIO, bytes], clean_path: str) -> str:
+    def _fallback_local_upload(cls, data: Union[BinaryIO, bytes], clean_path: str) -> str:
         """Saves file to local MEDIA_ROOT when MinIO is not running."""
         dest_full_path = Path(settings.MEDIA_ROOT) / clean_path
         dest_full_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if hasattr(file_obj, 'seek'):
-            file_obj.seek(0)
-
         with open(dest_full_path, 'wb') as f:
-            if isinstance(file_obj, bytes):
-                f.write(file_obj)
-            elif hasattr(file_obj, 'chunks'):
-                for chunk in file_obj.chunks():
+            if isinstance(data, bytes):
+                f.write(data)
+            elif hasattr(data, 'chunks'):
+                for chunk in data.chunks():
                     f.write(chunk)
-            elif hasattr(file_obj, 'read'):
-                f.write(file_obj.read())
+            elif hasattr(data, 'read'):
+                if hasattr(data, 'seek'):
+                    try:
+                        data.seek(0)
+                    except Exception:
+                        pass
+                f.write(data.read())
 
         logger.info(f"[StorageService] Saved to local fallback: {dest_full_path}")
         return f"local/{clean_path}"

@@ -351,6 +351,10 @@ class MonthlyPlan(models.Model):
     def fg_code(self):
         return self.fg_id
 
+    @fg_code.setter
+    def fg_code(self, value):
+        self.fg_id = value
+
     @property
     def fg_description(self):
         return self.fg.fg_description if self.fg else ''
