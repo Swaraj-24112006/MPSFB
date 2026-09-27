@@ -40,6 +40,7 @@ import vendorBuyerService from './services/vendorBuyerService';
 import { weekService, dtoToFrontend } from './services/weekService';
 import { monthlyPlanService } from './services/monthlyPlanService';
 import { mb51Service } from './services/mb51Service';
+import { stockService } from './services/stockService';
 
 // Monthly Upload Components
 import { WeekDefinitionManager } from './components/MonthlyUpload/WeekDefinitionManager';
@@ -252,6 +253,15 @@ export default function App() {
       .then((txs) => {
         if (Array.isArray(txs)) {
           setMb51List(txs);
+        }
+      })
+      .catch(() => {});
+
+    // Hydrate stock report from API
+    stockService.getStockReport()
+      .then((items) => {
+        if (Array.isArray(items)) {
+          setStockList(items);
         }
       })
       .catch(() => {});

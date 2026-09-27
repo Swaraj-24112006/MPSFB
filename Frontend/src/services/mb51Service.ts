@@ -134,7 +134,7 @@ export const mb51Service = {
       const formData = new FormData();
       formData.append('file', content.file);
       if (content.month) formData.append('month', content.month);
-      return api.post<MB51UploadResponse>('/uploads/mb51/', formData);
+      return api.upload<MB51UploadResponse>('/uploads/mb51/', formData);
     } else {
       return api.post<MB51UploadResponse>('/uploads/mb51/', {
         csv_text: content.csv_text || '',

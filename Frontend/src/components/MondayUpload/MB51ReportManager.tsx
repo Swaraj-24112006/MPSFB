@@ -16,7 +16,10 @@ import {
   Calendar,
   Layers,
   Trash2,
-  Loader2
+  Loader2,
+  FileSpreadsheet,
+  Info,
+  X
 } from 'lucide-react';
 import { MB51TransactionItem, MB51Classification, WeekDefinition } from '../../types';
 import { getWeekForTransaction } from '../../utils/weeklyMrpEngine';
@@ -44,6 +47,8 @@ export const MB51ReportManager: React.FC<MB51ReportManagerProps> = ({
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [uploadWarnings, setUploadWarnings] = useState<string[]>([]);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   // Form State
   const [formData, setFormData] = useState<Partial<MB51TransactionItem>>({
@@ -177,10 +182,28 @@ export const MB51ReportManager: React.FC<MB51ReportManagerProps> = ({
     }
   };
 
+  const handleDownloadTemplate = () => {
+    const csvContent =
+      'Material Document,Posting Date,Movement Type,Part Number,Material Description,Quantity,UOM,Storage Location,Partner / Vendor / Line,PO / Order No\n' +
+      '5000210031,2026-08-05,101,7.06496.03.0,Vacuum Pump Panther 2.0L,1500,PC,FG01,Line A-PMP2,PRD-88201\n' +
+      '5000210032,2026-08-06,101,100201,Die-Cast Aluminum Housing,3000,PC,SL01,Endurance Technologies,PO-4500091211\n' +
+      '5000210033,2026-08-07,601,7.06496.03.0,Vacuum Pump Panther 2.0L,2600,PC,FG01,Tata Motors PV & EV,SO-9021102\n' +
+      '5000210034,2026-08-08,101,100202,Precision Rotor Assembly,2200,PC,SL01,Bosch India,PO-4500091244\n';
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `SAP_MB51_Template_${selectedMonth || new Date().toISOString().slice(0, 7)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleCSVUpload = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!csvInput.trim()) {
-      alert('Please paste CSV or tab-separated data from SAP MB51 export.');
+    if (!selectedFile && !csvInput.trim()) {
+      alert('Please select a file (.csv, .xlsx, .tsv) or paste SAP MB51 export rows.');
       return;
     }
 
@@ -188,22 +211,39 @@ export const MB51ReportManager: React.FC<MB51ReportManagerProps> = ({
     setUploadWarnings([]);
     try {
       const resp = await mb51Service.bulkUpload({
-        csv_text: csvInput.trim(),
+        file: selectedFile || undefined,
+        csv_text: selectedFile ? undefined : csvInput.trim(),
         month: selectedMonth
       });
 
       const refreshed = await mb51Service.getTransactions({ month: selectedMonth });
-      if (refreshed && refreshed.length > 0) {
+      if (refreshed && Array.isArray(refreshed)) {
         onUpdateMB51(refreshed);
       }
       if (resp.warnings && resp.warnings.length > 0) {
         setUploadWarnings(resp.warnings);
       }
+      alert(
+        `SAP MB51 Movement Report processed successfully!\n` +
+        `• Total Rows: ${resp.total_rows}\n` +
+        `• Successfully Imported: ${resp.imported_rows}\n` +
+        `• Errors / Skipped: ${resp.error_rows}` +
+        (resp.warnings && resp.warnings.length > 0 ? `\n• Warnings: ${resp.warnings.length}` : '')
+      );
       setIsUploadModalOpen(false);
+      setSelectedFile(null);
       setCsvInput('');
     } catch (err: any) {
       console.warn('Backend bulk upload failed, parsing locally as fallback:', err);
-      const lines = csvInput.trim().split('\n');
+      // Fallback local parse for CSV text if provided
+      const rawText = csvInput.trim();
+      if (!rawText && selectedFile) {
+        alert(err?.message || 'Server upload failed. Please ensure the backend server is running.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      const lines = rawText.split('\n');
       const parsed: MB51TransactionItem[] = [];
 
       for (let i = 0; i < lines.length; i++) {
@@ -266,6 +306,7 @@ export const MB51ReportManager: React.FC<MB51ReportManagerProps> = ({
 
       onUpdateMB51([...parsed, ...mb51List]);
       setIsUploadModalOpen(false);
+      setSelectedFile(null);
       setCsvInput('');
     } finally {
       setIsSubmitting(false);
@@ -791,45 +832,150 @@ export const MB51ReportManager: React.FC<MB51ReportManagerProps> = ({
       {/* Upload Modal */}
       {isUploadModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-xl w-full p-6 border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
-            <h2 className="text-lg font-bold text-slate-900 mb-2 flex items-center gap-2">
-              <Upload className="w-5 h-5 text-blue-600" />
-              Upload SAP MB51 Movement Report
-            </h2>
-            <p className="text-xs text-slate-500 mb-4">
-              Paste rows from your SAP MB51 transaction dump. System automatically classifies 101 receipts (prefix 7 as FG, non-7 as RM/PM) and 601 as FG Dispatches.
-            </p>
+          <div className="bg-white rounded-xl shadow-xl max-w-xl w-full p-6 border border-slate-200 animate-in fade-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-4 mb-3">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <Upload className="w-5 h-5 text-blue-600" />
+                  Upload SAP MB51 Movement Report
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Import SAP MB51 material documents (.csv, .xlsx, .tsv). Auto-classifies 101 receipts and 601 dispatches.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleDownloadTemplate}
+                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg border border-blue-200 transition-colors"
+                title="Download sample MB51 CSV template"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Template
+              </button>
+            </div>
 
             <form onSubmit={handleCSVUpload} className="space-y-4">
+              {/* File Upload Drag & Drop Zone */}
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                  if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                    setSelectedFile(e.dataTransfer.files[0]);
+                  }
+                }}
+                className={`border-2 border-dashed rounded-xl p-5 text-center transition-all ${
+                  isDragging
+                    ? 'border-blue-500 bg-blue-50/70 scale-[1.01]'
+                    : selectedFile
+                    ? 'border-emerald-400 bg-emerald-50/40'
+                    : 'border-slate-300 hover:border-blue-400 bg-slate-50/60'
+                }`}
+              >
+                <input
+                  type="file"
+                  id="mb51-file-input"
+                  accept=".csv, .xlsx, .xlsm, .tsv, .txt"
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files[0]) {
+                      setSelectedFile(e.target.files[0]);
+                    }
+                  }}
+                />
+                <label
+                  htmlFor="mb51-file-input"
+                  className="cursor-pointer flex flex-col items-center justify-center gap-1.5"
+                >
+                  <FileSpreadsheet
+                    className={`w-9 h-9 ${
+                      selectedFile ? 'text-emerald-600' : 'text-blue-600'
+                    }`}
+                  />
+                  <div className="text-xs font-semibold text-slate-800">
+                    {selectedFile ? (
+                      <span className="text-emerald-800 font-bold">{selectedFile.name}</span>
+                    ) : (
+                      'Click to browse or drag & drop SAP MB51 file (.csv, .xlsx)'
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    {selectedFile
+                      ? `${(selectedFile.size / 1024).toFixed(1)} KB — Ready to upload`
+                      : 'Supports Excel spreadsheets and standard CSV / TSV exports'}
+                  </div>
+                </label>
+                {selectedFile && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedFile(null)}
+                    className="mt-2.5 inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 px-2 py-0.5 rounded transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                    Remove file
+                  </button>
+                )}
+              </div>
+
+              {/* Paste Text Area */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  MB51 Data (CSV or TSV)
+                  Or Paste CSV / Tab-Separated Data
                 </label>
                 <textarea
-                  rows={8}
-                  required
+                  rows={4}
                   value={csvInput}
                   onChange={(e) => setCsvInput(e.target.value)}
-                  placeholder={`MatDoc,PostingDate,Mvt,PartNumber,Description,Qty,UOM,SLOC,Partner\n5000210031,2026-08-05,101,7.06496.03.0,Vacuum Pump Panther,1500,PC,FG01,Line A-PMP2\n5000210032,2026-08-06,101,100201,Die-Cast Aluminum Housing,3000,PC,SL01,Endurance Tech\n5000210033,2026-08-07,601,7.06496.03.0,Vacuum Pump Panther,2600,PC,FG01,Tata Motors`}
-                  className="w-full p-3 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono"
+                  disabled={selectedFile !== null}
+                  placeholder={
+                    selectedFile
+                      ? 'File selected above. Clear file to paste raw text manually.'
+                      : `MatDoc,PostingDate,Mvt,PartNumber,Description,Qty,UOM,SLOC,Partner\n5000210031,2026-08-05,101,7.06496.03.0,Vacuum Pump Panther,1500,PC,FG01,Line A-PMP2\n5000210032,2026-08-06,101,100201,Die-Cast Aluminum Housing,3000,PC,SL01,Endurance Tech\n5000210033,2026-08-07,601,7.06496.03.0,Vacuum Pump Panther,2600,PC,FG01,Tata Motors`
+                  }
+                  className={`w-full p-3 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono ${
+                    selectedFile ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white'
+                  }`}
                 />
+              </div>
+
+              {/* Ingestion Rules Guide */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700 space-y-1">
+                <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                  <Info className="w-3.5 h-3.5 text-blue-600" />
+                  SAP Movement Classification Rules:
+                </div>
+                <ul className="list-disc list-inside text-[11px] text-slate-600 space-y-0.5">
+                  <li><strong>101 Movement + Prefix '7'</strong>: Finished Goods Production Receipt</li>
+                  <li><strong>101 Movement + Non-'7'</strong>: RM / PM Inward Vendor Receipt</li>
+                  <li><strong>601 Movement</strong>: Finished Goods Customer Dispatch / Issue</li>
+                  <li>All files are stored in MinIO storage and tracked with a unique Upload Batch ID</li>
+                </ul>
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setIsUploadModalOpen(false)}
+                  onClick={() => {
+                    setIsUploadModalOpen(false);
+                    setSelectedFile(null);
+                    setCsvInput('');
+                  }}
                   className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || (!selectedFile && !csvInput.trim())}
                   className="flex items-center gap-2 px-5 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg shadow-sm transition-colors"
                 >
                   {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                  Process MB51 Dump
+                  {isSubmitting ? 'Uploading & Processing...' : 'Process MB51 Upload'}
                 </button>
               </div>
             </form>
