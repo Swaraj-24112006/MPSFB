@@ -102,6 +102,28 @@ export const monthlyPlanService = {
     formData.append('month', month);
 
     return api.upload<MonthlyPlanUploadResponse>('uploads/monthly-plan/', formData);
+  },
+
+  /**
+   * Trigger backend cascade recalculation of weekly breakdowns for all plans in a month.
+   */
+  async recalculateProrated(month: string): Promise<{ message: string; month: string; updated_count: number }> {
+    return api.post<{ message: string; month: string; updated_count: number }>('monthly-plans/recalculate/', { month });
+  },
+
+  /**
+   * Export monthly plans as CSV directly from the backend
+   */
+  async downloadMonthlyPlanCSV(month: string): Promise<void> {
+    const blob = await api.downloadBlob('exports/monthly-plan-csv/', { month });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `Monthly_Plan_Export_${month}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 };
 

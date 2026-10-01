@@ -1,5 +1,6 @@
 import logging
 from typing import List, Dict, Any, Union
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
@@ -8,22 +9,18 @@ class ProrateService:
     @staticmethod
     def prorate(monthly_target: int, weeks: list) -> Dict[str, int]:
         """
-        Prorate monthly_target across weeks proportional to working_days,
-        with any remainder allocated to the final week.
-
-        Algorithm (Section 9):
-        1. Calculate total_working_days = sum(week.working_days for week in weeks)
-        2. If total_working_days <= 0 or no weeks: fallback evenly with remainder to last week.
-        3. For week_1 to week_(N-1):
-           prorated_qty = round(monthly_target * (week.working_days / total_working_days))
-           allocated += prorated_qty
-        4. For week_N (final week):
-           prorated_qty = max(0, monthly_target - allocated)  # gets the exact remainder
+        The core proration formula (Working-Day Proportional Proration):
+        - Sum total working days across all weeks.
+        - For each week except the last:
+            qty = round(monthly_target * (week.working_days / total_working_days))
+        - Last week gets the exact remainder to prevent rounding drift:
+            remainder = max(0, monthly_target - accumulated)
+        - Returns {week_code: integer_qty} dict where sum equals monthly_target exactly.
         """
         if not weeks or monthly_target <= 0:
             return {}
 
-        # Sort weeks by week_no if available
+        # Sort weeks by week_no ascending
         sorted_weeks = sorted(
             weeks,
             key=lambda w: getattr(w, 'week_no', 0) if hasattr(w, 'week_no') else (w.get('week_no', 0) if isinstance(w, dict) else 0)
@@ -40,67 +37,62 @@ class ProrateService:
             return 0
 
         total_working_days = sum(get_working_days(w) for w in sorted_weeks)
+        if total_working_days <= 0 or len(sorted_weeks) == 0:
+            return {}
+
         breakdown: Dict[str, int] = {}
+        accumulated = 0
 
-        if total_working_days <= 0:
-            # Fallback: distribute evenly across weeks with remainder to last week
-            n_weeks = len(sorted_weeks)
-            share = int(monthly_target // n_weeks)
-            for w in sorted_weeks:
-                breakdown[get_week_code(w)] = share
-            last_code = get_week_code(sorted_weeks[-1])
-            breakdown[last_code] += int(monthly_target - (share * n_weeks))
-            return breakdown
-
-        allocated = 0
-        for i, week in enumerate(sorted_weeks):
+        for idx, week in enumerate(sorted_weeks):
             code = get_week_code(week)
-            if i == len(sorted_weeks) - 1:
-                # Remainder to the last week
-                breakdown[code] = max(0, int(monthly_target - allocated))
+            if idx == len(sorted_weeks) - 1:
+                # Last week gets exact remainder — prevents rounding drift
+                breakdown[code] = max(0, int(monthly_target - accumulated))
             else:
                 w_days = get_working_days(week)
-                portion = int(round((monthly_target * w_days) / total_working_days))
-                breakdown[code] = portion
-                allocated += portion
+                qty = int(round(monthly_target * (w_days / total_working_days)))
+                breakdown[code] = qty
+                accumulated += qty
 
         return breakdown
 
     @staticmethod
     def cascade_reprorate(month: str) -> int:
         """
-        Re-run proration on all monthly_plan rows for the affected month.
-        Called whenever week definitions change (e.g. dates or holiday_days modified).
-        Returns the number of monthly_plan records updated.
+        Called whenever week definitions change for a month.
+        Fetches all monthly_plan rows where month=month.
+        Re-runs prorate() for each.
+        If no weeks remain, sets weekly_breakdown to {}.
+        Bulk-updates weekly_breakdown for all plans inside transaction.atomic().
+        Returns count of plans updated.
         """
         clean_month = month.strip()
-        try:
-            from core.models import MonthlyPlan, WeekDefinition
+        from core.models import MonthlyPlan, WeekDefinition
 
-            weeks = list(WeekDefinition.objects.filter(month=clean_month).order_by('week_no'))
-            if not weeks:
-                logger.warning(f"No week definitions found for month {clean_month}. Cannot cascade reprorate.")
-                return 0
+        weeks = list(WeekDefinition.objects.filter(month=clean_month).order_by('week_no'))
+        plans = list(MonthlyPlan.objects.filter(month=clean_month))
+        if not plans:
+            return 0
 
-            plans = MonthlyPlan.objects.filter(month=clean_month)
-            updated_count = 0
-
+        updated_count = 0
+        with transaction.atomic():
             for plan in plans:
-                plan.weekly_breakdown = ProrateService.prorate(plan.monthly_target, weeks)
+                if not weeks:
+                    # If all weeks deleted, un-prorate plans
+                    plan.weekly_breakdown = {}
+                else:
+                    plan.weekly_breakdown = ProrateService.prorate(plan.monthly_target, weeks)
                 plan.save(update_fields=['weekly_breakdown', 'updated_at'])
                 updated_count += 1
 
-            logger.info(f"Successfully re-prorated {updated_count} monthly plan(s) for {clean_month}.")
-            return updated_count
-
-        except Exception as e:
-            logger.error(f"Error in ProrateService.cascade_reprorate({clean_month}): {e}")
-            return 0
+        logger.info(f"Cascade reprorated {updated_count} plan(s) for month {clean_month}.")
+        return updated_count
 
     @staticmethod
     def prorate_plan_instance(plan, weeks) -> None:
         """
-        Helper method to recalculate weekly_breakdown for a plan instance and save.
+        Helper method to recalculate weekly_breakdown for a single plan instance and save.
         """
         plan.weekly_breakdown = ProrateService.prorate(plan.monthly_target, weeks)
         plan.save(update_fields=['weekly_breakdown', 'updated_at'])
+

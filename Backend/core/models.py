@@ -324,6 +324,16 @@ class MonthlyPlan(models.Model):
         help_text="Computed prorated weekly breakdown JSONB mapping week_code to integer quantity"
     )
 
+    upload_batch = models.ForeignKey(
+        'UploadBatch',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='monthly_plans',
+        db_index=True,
+        help_text="Upload batch audit reference"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -582,7 +592,424 @@ class StockReport(models.Model):
         return self.unrestricted_stock < self.safety_stock
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stage B — Monday Review Cockpit Models
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
+class VendorDeliverySchedule(models.Model):
+    """
+    Vendor delivery commitment for a specific component in a specific week.
+    Tracks PO-level promised quantities, expected dates, and delivery status.
+    All mutations are audit-logged via DeliveryScheduleChangeLog.
+    """
+    DELIVERY_STATUS_CHOICES = (
+        ('CONFIRMED_ON_TRACK', 'Confirmed On Track'),
+        ('IN_TRANSIT', 'In Transit'),
+        ('PARTIAL_PROMISE', 'Partial Promise'),
+        ('DELAYED_AT_RISK', 'Delayed At Risk'),
+        ('CANCELLED', 'Cancelled'),
+        ('CRITICAL_NO_PO', 'Critical - No PO'),
+    )
+
+    po_number = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="Purchase Order number (auto-generated if blank on create)"
+    )
+    component = models.ForeignKey(
+        RMPMComponentMaster,
+        to_field='component_code',
+        db_column='component_code',
+        on_delete=models.CASCADE,
+        related_name='delivery_schedules',
+        help_text="Component this delivery is for"
+    )
+    vendor_code = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        help_text="Vendor code from vendor_buyer_master"
+    )
+    vendor_name = models.CharField(
+        max_length=255,
+        db_index=True,
+        help_text="Vendor name (denormalized for display)"
+    )
+    buyer_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Buyer responsible for this PO"
+    )
+    expected_delivery_date = models.DateField(
+        db_index=True,
+        help_text="Expected arrival date of this delivery"
+    )
+    week = models.ForeignKey(
+        WeekDefinition,
+        to_field='week_code',
+        db_column='week_code',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='delivery_schedules',
+        help_text="Week bucket resolved from expected_delivery_date (server-side)"
+    )
+    promised_qty = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        default=Decimal('0.000'),
+        help_text="Promised delivery quantity"
+    )
+    carrier_or_tracking = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Carrier name or tracking reference"
+    )
+    delivery_status = models.CharField(
+        max_length=30,
+        choices=DELIVERY_STATUS_CHOICES,
+        default='CONFIRMED_ON_TRACK',
+        db_index=True,
+        help_text="Current delivery status"
+    )
+    notes = models.TextField(
+        blank=True,
+        default='',
+        help_text="Free-text notes about this delivery"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'vendor_delivery_schedule'
+        verbose_name = 'Vendor Delivery Schedule'
+        verbose_name_plural = 'Vendor Delivery Schedules'
+        ordering = ['expected_delivery_date', 'component']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['po_number', 'component', 'expected_delivery_date'],
+                name='unique_delivery_schedule_entry'
+            )
+        ]
+        indexes = [
+            models.Index(fields=['component', 'week']),
+            models.Index(fields=['delivery_status']),
+            models.Index(fields=['expected_delivery_date']),
+            models.Index(fields=['po_number']),
+            models.Index(fields=['vendor_name']),
+        ]
+
+    def __str__(self):
+        return f"PO {self.po_number} | {self.component_id} | {self.promised_qty} pcs on {self.expected_delivery_date} [{self.delivery_status}]"
+
+    @property
+    def component_code(self):
+        return self.component_id
+
+    @property
+    def week_code(self):
+        return self.week_id
+
+
+class DeliveryScheduleChangeLog(models.Model):
+    """
+    Append-only audit log for all mutations to VendorDeliverySchedule.
+    Denormalizes key fields so the audit trail persists even if the schedule row is deleted.
+    Never updated or deleted — INSERT only.
+    """
+    schedule = models.ForeignKey(
+        VendorDeliverySchedule,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='change_logs',
+        help_text="FK to the schedule row (SET_NULL if schedule is deleted)"
+    )
+    po_number = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="Denormalized PO number for audit persistence"
+    )
+    component_code = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="Denormalized component code for audit persistence"
+    )
+    vendor_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Denormalized vendor name"
+    )
+    changed_by = models.CharField(
+        max_length=255,
+        help_text="Name of the person who made the change"
+    )
+    changed_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True,
+        help_text="Timestamp of the change"
+    )
+    field_changed = models.CharField(
+        max_length=500,
+        help_text="Description of which field(s) were changed"
+    )
+    old_value = models.TextField(
+        blank=True,
+        default='',
+        help_text="Previous value before the change"
+    )
+    new_value = models.TextField(
+        blank=True,
+        default='',
+        help_text="New value after the change"
+    )
+    reason_for_change = models.TextField(
+        help_text="Mandatory reason for the change (minimum 10 characters)"
+    )
+
+    class Meta:
+        db_table = 'delivery_schedule_change_log'
+        verbose_name = 'Delivery Schedule Change Log'
+        verbose_name_plural = 'Delivery Schedule Change Logs'
+        ordering = ['-changed_at']
+        indexes = [
+            models.Index(fields=['schedule']),
+            models.Index(fields=['po_number']),
+            models.Index(fields=['component_code']),
+            models.Index(fields=['-changed_at']),
+        ]
+
+    def __str__(self):
+        return f"[{self.changed_at}] PO {self.po_number} | {self.field_changed} by {self.changed_by}"
+
+
+class FGPlanFreeze(models.Model):
+    """
+    Freeze status for an FG's weekly production plan.
+    When FROZEN, the FG's component stock is reserved before other FGs can claim it.
+
+    State machine: DRAFT → REVIEWED → FROZEN (forward only)
+                   FROZEN → DRAFT (unfreeze for replanning)
+    """
+    FREEZE_STATUS_CHOICES = (
+        ('DRAFT', 'Draft'),
+        ('REVIEWED', 'Reviewed'),
+        ('FROZEN', 'Frozen'),
+    )
+
+    fg = models.ForeignKey(
+        BOMFGHeader,
+        to_field='fg_code',
+        db_column='fg_code',
+        on_delete=models.CASCADE,
+        related_name='plan_freezes',
+        help_text="Finished Good this freeze applies to"
+    )
+    month = models.CharField(
+        max_length=7,
+        db_index=True,
+        help_text="Month in YYYY-MM format"
+    )
+    week = models.ForeignKey(
+        WeekDefinition,
+        to_field='week_code',
+        db_column='week_code',
+        on_delete=models.CASCADE,
+        related_name='plan_freezes',
+        help_text="Week this freeze applies to"
+    )
+    status = models.CharField(
+        max_length=10,
+        choices=FREEZE_STATUS_CHOICES,
+        default='DRAFT',
+        db_index=True,
+        help_text="Current freeze status"
+    )
+    frozen_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when status transitioned to FROZEN (set server-side)"
+    )
+    frozen_by = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Name/role of the person who froze the plan"
+    )
+    freeze_notes = models.TextField(
+        blank=True,
+        default='',
+        help_text="Notes about why the plan was frozen"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'fg_plan_freeze'
+        verbose_name = 'FG Plan Freeze'
+        verbose_name_plural = 'FG Plan Freezes'
+        ordering = ['month', 'fg']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['fg', 'month', 'week'],
+                name='unique_fg_plan_freeze_per_week'
+            )
+        ]
+        indexes = [
+            models.Index(fields=['month', 'fg']),
+            models.Index(fields=['status']),
+            models.Index(fields=['month', 'week']),
+        ]
+
+    def __str__(self):
+        return f"{self.fg_id} | {self.month} | {self.week_id} → {self.status}"
+
+    @property
+    def fg_code(self):
+        return self.fg_id
+
+    @property
+    def week_code(self):
+        return self.week_id
+
+
+class MondayReviewAction(models.Model):
+    """
+    Action item logged during Monday review meetings.
+    Tracks issues, resolutions, owners, and escalation status per FG per week.
+    Upsert behavior on (fg, week, component_code): DELETE existing then INSERT new.
+    """
+    ISSUE_TYPE_CHOICES = (
+        ('RM_SHORTAGE', 'RM Shortage'),
+        ('BACKLOG_RECOVERY', 'Backlog Recovery'),
+        ('VENDOR_DELAY', 'Vendor Delay'),
+        ('CAPACITY_LINE_SPEED', 'Capacity / Line Speed'),
+        ('QUALITY_HOLD', 'Quality Hold'),
+    )
+
+    ACTION_STATUS_CHOICES = (
+        ('PENDING_DISCUSSION', 'Pending Discussion'),
+        ('AMICABLE_SOLUTION_AGREED', 'Amicable Solution Agreed'),
+        ('ESCALATED_LEVEL_1', 'Escalated Level 1'),
+        ('ESCALATED_LEVEL_2', 'Escalated Level 2'),
+        ('ESCALATED_LEVEL_3', 'Escalated Level 3'),
+        ('RESOLVED', 'Resolved'),
+    )
+
+    fg = models.ForeignKey(
+        BOMFGHeader,
+        to_field='fg_code',
+        db_column='fg_code',
+        on_delete=models.CASCADE,
+        related_name='monday_review_actions',
+        help_text="Finished Good this action relates to"
+    )
+    week = models.ForeignKey(
+        WeekDefinition,
+        to_field='week_code',
+        db_column='week_code',
+        on_delete=models.CASCADE,
+        related_name='monday_review_actions',
+        help_text="Week this action was logged for"
+    )
+    month = models.CharField(
+        max_length=7,
+        db_index=True,
+        help_text="Month in YYYY-MM format"
+    )
+    component_code = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Optional: specific component code the action is about"
+    )
+    component_description = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Description of the component (denormalized)"
+    )
+    issue_type = models.CharField(
+        max_length=30,
+        choices=ISSUE_TYPE_CHOICES,
+        db_index=True,
+        help_text="Category of the issue"
+    )
+    description = models.TextField(
+        help_text="Detailed description of the issue"
+    )
+    impact_summary = models.TextField(
+        blank=True,
+        default='',
+        help_text="Summary of the business impact"
+    )
+    status = models.CharField(
+        max_length=30,
+        choices=ACTION_STATUS_CHOICES,
+        default='PENDING_DISCUSSION',
+        db_index=True,
+        help_text="Current action status"
+    )
+    resolution_notes = models.TextField(
+        blank=True,
+        default='',
+        help_text="Notes about how this was / will be resolved"
+    )
+    agreed_action = models.TextField(
+        blank=True,
+        default='',
+        help_text="The specific action agreed upon during the meeting"
+    )
+    assigned_owner = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Person assigned to resolve this action"
+    )
+    target_resolution_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Target date to resolve this action"
+    )
+    escalated_to = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Person/role this was escalated to (if escalated)"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'monday_review_action'
+        verbose_name = 'Monday Review Action'
+        verbose_name_plural = 'Monday Review Actions'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['month', 'week', 'fg']),
+            models.Index(fields=['status']),
+            models.Index(fields=['issue_type']),
+            models.Index(fields=['month', 'fg']),
+            models.Index(fields=['component_code']),
+        ]
+
+    def __str__(self):
+        return f"{self.fg_id} | {self.week_id} | {self.issue_type} → {self.status}"
+
+    @property
+    def fg_code(self):
+        return self.fg_id
+
+    @property
+    def week_code(self):
+        return self.week_id
 
 

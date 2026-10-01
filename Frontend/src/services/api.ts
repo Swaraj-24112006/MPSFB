@@ -177,6 +177,30 @@ export const api = {
     });
     return handleResponse<T>(response);
   },
+
+  async downloadBlob(path: string, params?: Record<string, string>): Promise<Blob> {
+    let url = getUrl(path);
+    if (params) {
+      const searchParams = new URLSearchParams();
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') {
+          searchParams.append(k, v);
+        }
+      });
+      const qs = searchParams.toString();
+      if (qs) url += `?${qs}`;
+    }
+    const headers = buildHeaders();
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      throw new Error(`Download failed with status ${response.status}`);
+    }
+    return response.blob();
+  },
+
+  getBaseUrl(): string {
+    return API_BASE_URL.endsWith('/') ? API_BASE_URL : `${API_BASE_URL}/`;
+  },
 };
 
 export default api;

@@ -24,7 +24,11 @@ from .models import (
     WeekDefinition,
     MonthlyPlan,
     MB51Transaction,
-    StockReport
+    StockReport,
+    VendorDeliverySchedule,
+    DeliveryScheduleChangeLog,
+    FGPlanFreeze,
+    MondayReviewAction,
 )
 from .serializers import (
     BOMFGHeaderSerializer,
@@ -34,7 +38,12 @@ from .serializers import (
     WeekDefinitionSerializer,
     MonthlyPlanSerializer,
     MB51TransactionSerializer,
-    StockReportSerializer
+    StockReportSerializer,
+    VendorDeliveryScheduleSerializer,
+    DeliveryScheduleChangeLogSerializer,
+    FGPlanFreezeSerializer,
+    MondayReviewActionSerializer,
+    UploadBatchSerializer,
 )
 import logging
 
@@ -49,10 +58,15 @@ from .services import (
     WeekService,
     ProrateService,
     MonthlyPlanParser,
+    MonthlyPlanUploadService,
     MB51ClassificationService,
     WeekMappingService,
     MB51Parser,
-    StockParser
+    StockParser,
+    AuditLogService,
+    PlanFreezeService,
+    CockpitDataLoaderService,
+    CockpitEngineService,
 )
 
 
@@ -1158,7 +1172,7 @@ class WeekDetailView(generics.RetrieveUpdateDestroyAPIView):
     Cascades reproration across all monthly_plan rows for the affected month.
 
     DELETE /api/weeks/{id}/
-    Deletes the week definition and cascades reproration.
+    Deletes the week definition and cascades reproration. Blocks if referenced by plan freeze or review actions.
     """
     queryset = WeekDefinition.objects.all()
     serializer_class = WeekDefinitionSerializer
@@ -1173,20 +1187,45 @@ class WeekDetailView(generics.RetrieveUpdateDestroyAPIView):
                 pass
         return super().get_object()
 
-    def perform_update(self, serializer):
-        instance = serializer.save()
-        ProrateService.cascade_reprorate(instance.month)
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            self.perform_update(serializer)
+            cascade_count = ProrateService.cascade_reprorate(instance.month)
+        data = serializer.data
+        data['cascade_plans_updated'] = cascade_count
+        return Response(data, status=status.HTTP_200_OK)
 
-    def perform_destroy(self, instance):
-        month = instance.month
-        instance.delete()
-        ProrateService.cascade_reprorate(month)
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        # Check foreign references
+        if FGPlanFreeze.objects.filter(week_id=instance.week_code).exists():
+            return Response(
+                {"error": f"Cannot delete week '{instance.week_code}': referenced by plan freeze records."},
+                status=status.HTTP_409_CONFLICT
+            )
+        if MondayReviewAction.objects.filter(week_id=instance.week_code).exists():
+            return Response(
+                {"error": f"Cannot delete week '{instance.week_code}': referenced by Monday Review action items."},
+                status=status.HTTP_409_CONFLICT
+            )
+        with transaction.atomic():
+            month = instance.month
+            instance.delete()
+            cascade_count = ProrateService.cascade_reprorate(month)
+        return Response({
+            "deleted": True,
+            "cascade_plans_updated": cascade_count
+        }, status=status.HTTP_200_OK)
 
 
 class WeekAutoGenerateView(APIView):
     """
     POST /api/weeks/auto-generate/
-    Auto-generates standard factory 4-week split for a given month or entire year.
+    Auto-generates standard 4-week split for a given month or entire year.
     Payload:
     {
         "month": "2026-08",          // Target month (YYYY-MM)
@@ -1203,33 +1242,39 @@ class WeekAutoGenerateView(APIView):
         if isinstance(overwrite, str):
             overwrite = overwrite.lower() in ('true', '1', 'yes')
 
-        months_to_generate = []
-        if month:
-            months_to_generate.append(month.strip())
-        elif year:
-            try:
-                year_int = int(year)
-                for m in range(1, 13):
-                    months_to_generate.append(f"{year_int:04d}-{m:02d}")
-            except ValueError:
-                return Response(
-                    {"error": f"Invalid year '{year}'."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        else:
+        if month and year:
             return Response(
-                {"error": "Please provide either 'month' (YYYY-MM) or 'year' (YYYY)."},
+                {"error": "Provide either 'month' or 'year', not both."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        created_objs = []
-        try:
-            with transaction.atomic():
-                for m in months_to_generate:
-                    if overwrite:
-                        WeekDefinition.objects.filter(month=m).delete()
+        if month:
+            clean_month = month.strip()
+            parts = clean_month.split('-')
+            if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                return Response(
+                    {"error": f"Invalid month format '{clean_month}'. Expected YYYY-MM."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-                    week_data_list = WeekService.get_standard_week_data_for_month(m)
+            # Check cascade blocks if overwrite
+            if overwrite:
+                existing_codes = list(WeekDefinition.objects.filter(month=clean_month).values_list('week_code', flat=True))
+                if existing_codes:
+                    if FGPlanFreeze.objects.filter(week_id__in=existing_codes).exists() or \
+                       MondayReviewAction.objects.filter(week_id__in=existing_codes).exists():
+                        return Response(
+                            {"error": f"Cannot overwrite weeks for month {clean_month} because existing weeks are referenced by plan freeze or Monday Review actions."},
+                            status=status.HTTP_409_CONFLICT
+                        )
+
+            try:
+                week_data_list = WeekService.generate_standard_4_week_split(clean_month)
+                created_objs = []
+                with transaction.atomic():
+                    if overwrite:
+                        WeekDefinition.objects.filter(month=clean_month).delete()
+
                     for w_data in week_data_list:
                         week_obj, _ = WeekDefinition.objects.update_or_create(
                             month=w_data['month'],
@@ -1246,21 +1291,110 @@ class WeekAutoGenerateView(APIView):
                         )
                         created_objs.append(week_obj)
 
-                    # Trigger cascade reproration for the month
-                    ProrateService.cascade_reprorate(m)
+                    ProrateService.cascade_reprorate(clean_month)
 
-            serializer = WeekDefinitionSerializer(created_objs, many=True)
-            return Response({
-                "message": f"Successfully generated {len(created_objs)} week definition(s) across {len(months_to_generate)} month(s).",
-                "count": len(created_objs),
-                "results": serializer.data
-            }, status=status.HTTP_200_OK)
+                serializer = WeekDefinitionSerializer(created_objs, many=True)
+                return Response({
+                    "message": f"Successfully generated 4 week definition(s) for {clean_month}.",
+                    "count": len(created_objs),
+                    "results": serializer.data
+                }, status=status.HTTP_200_OK)
+            except Exception as ex:
+                return Response({"error": f"Failed to auto-generate weeks: {str(ex)}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        except Exception as ex:
+        elif year:
+            try:
+                year_int = int(year)
+            except (ValueError, TypeError):
+                return Response({"error": f"Invalid year '{year}'."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if overwrite:
+                year_codes = list(WeekDefinition.objects.filter(month__startswith=f"{year_int:04d}-").values_list('week_code', flat=True))
+                if year_codes:
+                    if FGPlanFreeze.objects.filter(week_id__in=year_codes).exists() or \
+                       MondayReviewAction.objects.filter(week_id__in=year_codes).exists():
+                        return Response(
+                            {"error": f"Cannot overwrite weeks for year {year_int} because existing weeks are referenced by plan freeze or Monday Review actions."},
+                            status=status.HTTP_409_CONFLICT
+                        )
+
+            try:
+                full_year_data = WeekService.generate_full_year(year_int)
+                created_objs = []
+                with transaction.atomic():
+                    if overwrite:
+                        WeekDefinition.objects.filter(month__startswith=f"{year_int:04d}-").delete()
+
+                    for w_data in full_year_data:
+                        week_obj, _ = WeekDefinition.objects.update_or_create(
+                            month=w_data['month'],
+                            week_no=w_data['week_no'],
+                            defaults={
+                                'week_code': w_data['week_code'],
+                                'week_label': w_data['week_label'],
+                                'start_date': w_data['start_date'],
+                                'end_date': w_data['end_date'],
+                                'days_count': w_data['days_count'],
+                                'holiday_days': w_data['holiday_days'],
+                                'working_days': w_data['working_days'],
+                            }
+                        )
+                        created_objs.append(week_obj)
+
+                    for m in range(1, 13):
+                        month_str = f"{year_int:04d}-{m:02d}"
+                        ProrateService.cascade_reprorate(month_str)
+
+                serializer = WeekDefinitionSerializer(created_objs, many=True)
+                return Response({
+                    "message": f"Successfully generated {len(created_objs)} week definition(s) for year {year_int}.",
+                    "count": len(created_objs),
+                    "results": serializer.data
+                }, status=status.HTTP_200_OK)
+            except Exception as ex:
+                return Response({"error": f"Failed to auto-generate full year: {str(ex)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        else:
             return Response(
-                {"error": f"Failed to auto-generate weeks: {str(ex)}"},
+                {"error": "Please provide either 'month' (YYYY-MM) or 'year' (YYYY)."},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+
+class WeekCSVExportView(APIView):
+    """
+    GET /api/exports/weeks-csv/?month=YYYY-MM
+    Returns week definitions as a downloadable CSV.
+    """
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+
+    def get(self, request):
+        month = request.query_params.get('month')
+        qs = WeekDefinition.objects.all().order_by('month', 'week_no')
+        if month:
+            qs = qs.filter(month=month.strip())
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['Month', 'Week No', 'Week Code', 'Week Label', 'Start Date', 'End Date', 'Days Count', 'Holiday Days', 'Working Days'])
+        for w in qs:
+            writer.writerow([
+                w.month,
+                w.week_no,
+                w.week_code,
+                w.week_label,
+                w.start_date,
+                w.end_date,
+                w.days_count,
+                w.holiday_days,
+                w.working_days
+            ])
+
+        output.seek(0)
+        filename = f"Weeks_{month.strip()}.csv" if month else "Weeks_All.csv"
+        response = StreamingHttpResponse(iter([output.getvalue()]), content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
 
 class MonthlyPlanListCreateView(generics.ListCreateAPIView):
@@ -1269,7 +1403,7 @@ class MonthlyPlanListCreateView(generics.ListCreateAPIView):
     List monthly plans with optional month filter, search filter, and pagination.
 
     POST /api/monthly-plans/
-    Create a new monthly plan. Validates fg_code starts with '7' and exists in bom_fg_header.
+    Create a new monthly plan. Validates fg_code starts with '7' and uniqueness on (fg, month).
     Auto-computes weekly_breakdown via ProrateService.prorate() based on working days.
     """
     queryset = MonthlyPlan.objects.select_related('fg').all()
@@ -1295,9 +1429,22 @@ class MonthlyPlanListCreateView(generics.ListCreateAPIView):
         return qs.order_by('fg__fg_code')
 
     def paginate_queryset(self, queryset):
-        if self.request.query_params.get('paginate', '').lower() == 'false':
+        if self.request.query_params.get('paginate', '').lower() in ('false', '0', 'no'):
             return None
         return super().paginate_queryset(queryset)
+
+    def create(self, request, *args, **kwargs):
+        fg_code = str(request.data.get('fg_code', '')).strip()
+        month = str(request.data.get('month', '')).strip()
+
+        # Check uniqueness constraint: 409 Conflict if duplicate
+        if fg_code and month and MonthlyPlan.objects.filter(fg__fg_code=fg_code, month=month).exists():
+            return Response(
+                {"error": f"A monthly plan for Finished Good '{fg_code}' in month '{month}' already exists."},
+                status=status.HTTP_409_CONFLICT
+            )
+
+        return super().create(request, *args, **kwargs)
 
 
 class MonthlyPlanDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -1306,13 +1453,125 @@ class MonthlyPlanDetailView(generics.RetrieveUpdateDestroyAPIView):
     Retrieve individual monthly plan.
 
     PATCH /api/monthly-plans/{id}/
-    Update monthly plan target or notes. Recalculates weekly_breakdown if target changes.
+    Update monthly plan target, customer, or notes. Recalculates weekly_breakdown if target changes.
 
     DELETE /api/monthly-plans/{id}/
-    Hard delete of monthly plan.
+    Hard delete of monthly plan. Blocked if frozen.
     """
     queryset = MonthlyPlan.objects.select_related('fg').all()
     serializer_class = MonthlyPlanSerializer
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+
+    def update(self, request, *args, **kwargs):
+        # Ignore client-submitted weekly_breakdown (always computed server-side)
+        if 'weekly_breakdown' in request.data:
+            request.data.pop('weekly_breakdown', None)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        fg_code = instance.fg_id
+        month = instance.month
+
+        # Check if fg_plan_freeze rows exist for (fg_code, month)
+        freeze_rows = FGPlanFreeze.objects.filter(fg_id=fg_code, month=month)
+        if freeze_rows.filter(status='FROZEN').exists():
+            return Response(
+                {"error": "Cannot delete a frozen plan."},
+                status=status.HTTP_409_CONFLICT
+            )
+
+        with transaction.atomic():
+            # If DRAFT or REVIEWED, delete freeze records first
+            freeze_rows.delete()
+            instance.delete()
+
+        return Response({
+            "deleted": True,
+            "message": f"Monthly Plan for {fg_code} ({month}) deleted successfully."
+        }, status=status.HTTP_200_OK)
+
+
+class MonthlyPlanRecalculateView(APIView):
+    """
+    POST /api/monthly-plans/recalculate/
+    Recalculates weekly breakdown proration for all monthly plans of a given month.
+    Triggered by 'Recalculate Weeks' button.
+    """
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+
+    def post(self, request):
+        month = request.data.get('month') or request.query_params.get('month')
+        if not month:
+            return Response({"error": "Month parameter is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        clean_month = month.strip()
+        count = ProrateService.cascade_reprorate(clean_month)
+        plans = MonthlyPlan.objects.filter(month=clean_month).select_related('fg').order_by('fg__fg_code')
+        serializer = MonthlyPlanSerializer(plans, many=True)
+        return Response({
+            "message": f"Successfully recalculated proration for {count} plan(s) in {clean_month}.",
+            "month": clean_month,
+            "cascade_plans_updated": count,
+            "results": serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class MonthlyPlanCSVExportView(APIView):
+    """
+    GET /api/exports/monthly-plan-csv/?month=YYYY-MM
+    Returns all monthly plans for the month as a downloadable CSV.
+    Columns: FG Code, FG Description, Customer Name, Month, Monthly Target, W1 (...), W2 (...), ..., UOM
+    """
+    permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
+
+    def get(self, request):
+        month = request.query_params.get('month')
+        if not month:
+            return Response({"error": "Query param 'month' (YYYY-MM) is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        clean_month = month.strip()
+        plans = list(MonthlyPlan.objects.filter(month=clean_month).select_related('fg').order_by('fg__fg_code'))
+        weeks = list(WeekDefinition.objects.filter(month=clean_month).order_by('week_no'))
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        headers = ['FG Code', 'FG Description', 'Customer Name', 'Month', 'Monthly Target']
+        for w in weeks:
+            headers.append(f"{w.week_label} (Target)")
+        headers.append('UOM')
+        headers.append('Notes')
+        writer.writerow(headers)
+
+        for p in plans:
+            breakdown = p.weekly_breakdown or {}
+            row = [
+                p.fg_id,
+                p.fg.fg_description if p.fg else '',
+                p.customer_name or '',
+                p.month,
+                p.monthly_target,
+            ]
+            for w in weeks:
+                row.append(breakdown.get(w.week_code, 0))
+            row.append(p.uom)
+            row.append(p.custom_notes or '')
+            writer.writerow(row)
+
+        output.seek(0)
+        response = StreamingHttpResponse(iter([output.getvalue()]), content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="Monthly_Plan_{clean_month}.csv"'
+        return response
+
+
+class UploadBatchDetailView(generics.RetrieveAPIView):
+    """
+    GET /api/uploads/batches/{id}/
+    Returns batch status, row counts, and per-row error details.
+    """
+    queryset = UploadBatch.objects.all()
+    serializer_class = UploadBatchSerializer
     permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
 
 
@@ -1324,18 +1583,6 @@ class MonthlyPlanBulkUploadView(APIView):
     - Multipart file: 'file'
     - Or JSON / Form field: 'csv_content' / 'pasted_text'
     - Target month: 'month' (e.g. '2026-08' - required in form data or query param)
-
-    Processing:
-    1. Validates that month is provided and that week_definition rows exist for that month (otherwise 400).
-    2. Uploads file to MinIO storage via StorageService.upload_file().
-    3. Initializes an UploadBatch audit record.
-    4. Parses rows via MonthlyPlanParser.parse(file_or_text, month).
-    5. For each valid row:
-       - Auto-creates/verifies parent BOMFGHeader.
-       - Derives weekly_breakdown via ProrateService.prorate(monthly_target, weeks).
-       - Upserts MonthlyPlan on (fg, month).
-    6. Calls UploadBatchService.complete() with imported and error counts.
-    7. Returns comprehensive import feedback.
     """
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     permission_classes = [AllowAny] if settings.DEBUG else [IsAuthenticated]
@@ -1361,10 +1608,7 @@ class MonthlyPlanBulkUploadView(APIView):
         if not weeks:
             return Response(
                 {
-                    "error": (
-                        f"No week definitions configured for month '{clean_month}'. "
-                        f"Please configure or auto-generate weeks in the 'Define Week No.' tab before uploading plans."
-                    )
+                    "error": f"No week definitions found for {clean_month}. Define weeks first."
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -1373,7 +1617,7 @@ class MonthlyPlanBulkUploadView(APIView):
         if not file_obj:
             raw_content = request.data.get('csv_content') or request.data.get('pasted_text')
             if raw_content:
-                file_obj = io.BytesIO(raw_content.encode('utf-8'))
+                file_obj = raw_content
                 file_name = f"monthly_plan_{clean_month}.csv"
             else:
                 return Response(
@@ -1383,122 +1627,16 @@ class MonthlyPlanBulkUploadView(APIView):
         else:
             file_name = file_obj.name
 
-        # Verify allowed file extensions
-        ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
-        if ext not in ('csv', 'xlsx', 'xlsm', 'txt'):
-            return Response(
-                {"error": f"Unsupported file type '.{ext}'. Supported formats: .csv, .xlsx, .txt."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # 1. Store original file in MinIO
-        try:
-            minio_path = StorageService.upload_file(
-                file_obj,
-                f"monthly_plan_uploads/{clean_month}/{file_name}"
-            )
-        except Exception as e:
-            logger.warning(f"StorageService upload fallback: {e}")
-            minio_path = f"fallback/{file_name}"
-
-        # 2. Create UploadBatch audit record
         username = request.user.username if request.user and request.user.is_authenticated else 'system'
-        batch = UploadBatchService.create_batch(
-            upload_type='MONTHLY_PLAN',
-            user=username,
-            file_name=file_name,
-            minio_path=minio_path,
-            total_rows=0
+        result = MonthlyPlanUploadService.upload(
+            month=clean_month,
+            file_or_text=file_obj,
+            uploaded_by=username,
+            file_name=file_name
         )
 
-        # 3. Parse rows using MonthlyPlanParser
-        try:
-            parse_result = MonthlyPlanParser.parse(file_obj, clean_month)
-        except Exception as parse_ex:
-            UploadBatchService.fail(batch, f"Parsing error: {str(parse_ex)}")
-            return Response(
-                {"error": f"Failed to parse upload file: {str(parse_ex)}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        valid_rows = parse_result.get('valid_rows', [])
-        error_rows = parse_result.get('error_rows', [])
-        total_rows = parse_result.get('total_rows', len(valid_rows) + len(error_rows))
-
-        batch.total_rows = total_rows
-        batch.save(update_fields=['total_rows'])
-
-        imported_plans = []
-
-        try:
-            with transaction.atomic():
-                for row in valid_rows:
-                    fg_code = row['fg_code']
-                    monthly_target = row['monthly_target']
-                    fg_description = row.get('fg_description') or ''
-                    customer_name = row.get('customer_name') or ''
-                    uom = row.get('uom') or 'PC'
-                    custom_notes = row.get('custom_notes') or ''
-
-                    # Auto-create or update parent BOMFGHeader
-                    fg_header, _ = BOMFGHeader.objects.get_or_create(
-                        fg_code=fg_code,
-                        defaults={
-                            'fg_description': fg_description or f"Product {fg_code}",
-                            'customer_segment': customer_name,
-                            'uom': uom,
-                            'active_bom_version': 'v1',
-                            'is_active': True,
-                        }
-                    )
-                    # If description was provided in CSV and existing header has placeholder, update it
-                    if fg_description and fg_header.fg_description.startswith('Product '):
-                        fg_header.fg_description = fg_description
-                        fg_header.save(update_fields=['fg_description'])
-
-                    # Compute weekly proration
-                    weekly_breakdown = ProrateService.prorate(monthly_target, weeks)
-
-                    # Upsert MonthlyPlan on (fg, month)
-                    plan, _ = MonthlyPlan.objects.update_or_create(
-                        fg=fg_header,
-                        month=clean_month,
-                        defaults={
-                            'monthly_target': monthly_target,
-                            'customer_name': customer_name or fg_header.customer_segment or '',
-                            'custom_notes': custom_notes,
-                            'uom': uom or fg_header.uom or 'PC',
-                            'weekly_breakdown': weekly_breakdown,
-                        }
-                    )
-                    imported_plans.append(plan)
-
-            # Mark batch completed
-            UploadBatchService.complete(
-                batch,
-                imported_rows=len(imported_plans),
-                error_rows=len(error_rows),
-                error_detail={"skipped_rows": error_rows} if error_rows else {}
-            )
-
-            serializer = MonthlyPlanSerializer(imported_plans, many=True)
-            return Response({
-                "message": f"Successfully processed monthly plan for {clean_month}.",
-                "batch_id": batch.id,
-                "month": clean_month,
-                "total_rows": total_rows,
-                "imported_rows": len(imported_plans),
-                "error_rows": len(error_rows),
-                "errors": error_rows,
-                "results": serializer.data
-            }, status=status.HTTP_200_OK)
-
-        except Exception as ex:
-            UploadBatchService.fail(batch, f"Database persistence error: {str(ex)}")
-            return Response(
-                {"error": f"Failed to persist monthly plan records: {str(ex)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        status_code = status.HTTP_200_OK if result.get('imported_rows', 0) > 0 or result.get('error_rows', 0) == 0 else status.HTTP_400_BAD_REQUEST
+        return Response(result, status=status_code)
 
 
 # ============================================================================
@@ -2204,6 +2342,396 @@ class StockExportCSVView(APIView):
         return response
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stage D — Monday Review Cockpit Views
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
+class MondayReviewCockpitView(APIView):
+    """
+    D1: GET /api/reports/monday-review-cockpit/
+    Main cockpit computation endpoint.
+    Calls CockpitDataLoaderService → CockpitEngineService and returns the full result.
+    """
+    permission_classes = [AllowAny]
 
+    def get(self, request):
+        month = request.query_params.get('month')
+        week_code = request.query_params.get('week_code')
+        fg_code_filter = request.query_params.get('fg_code')
+        status_filter = request.query_params.get('status')
+
+        if not month:
+            return Response(
+                {'error': 'Query parameter "month" is required (YYYY-MM format).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            data_package = CockpitDataLoaderService.load(month, week_code)
+            result = CockpitEngineService.compute(data_package)
+
+            # Apply optional filters
+            items = result['cockpit_items']
+            if fg_code_filter:
+                items = [i for i in items if i['fgCode'] == fg_code_filter]
+            if status_filter:
+                items = [i for i in items if i['healthStatus'] == status_filter]
+            result['cockpit_items'] = items
+
+            return Response(result, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception(f"Cockpit computation error: {e}")
+            return Response(
+                {'error': f'Internal error computing cockpit: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class PlanFreezeListView(APIView):
+    """
+    D2: GET /api/plan-freeze/
+    List freeze records filtered by month and optional week_code.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        month = request.query_params.get('month')
+        week_code = request.query_params.get('week_code')
+        fg_code = request.query_params.get('fg_code')
+
+        qs = FGPlanFreeze.objects.select_related('fg', 'week').all()
+        if month:
+            qs = qs.filter(month=month)
+        if week_code:
+            qs = qs.filter(week_id=week_code)
+        if fg_code:
+            qs = qs.filter(fg_id=fg_code)
+
+        serializer = FGPlanFreezeSerializer(qs, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PlanFreezeUpdateView(APIView):
+    """
+    D3: POST /api/plan-freeze/
+    Freeze or unfreeze a single FG plan.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        fg_code = request.data.get('fg_code')
+        month = request.data.get('month')
+        week_code = request.data.get('week_code')
+        new_status = request.data.get('status')
+        frozen_by = request.data.get('frozen_by', '')
+        freeze_notes = request.data.get('freeze_notes', '')
+
+        if not all([fg_code, month, week_code, new_status]):
+            return Response(
+                {'error': 'fg_code, month, week_code, and status are required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            record, created = PlanFreezeService.upsert(
+                fg_code=fg_code,
+                month=month,
+                week_code=week_code,
+                new_status=new_status,
+                frozen_by=frozen_by,
+                freeze_notes=freeze_notes,
+            )
+            serializer = FGPlanFreezeSerializer(record)
+            return Response(
+                serializer.data,
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionError as e:
+            return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class PlanFreezeBulkView(APIView):
+    """
+    D4: POST /api/plan-freeze/bulk/
+    Freeze multiple FG plans in one batch (auto-freeze all OK plans).
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        fg_codes = request.data.get('fg_codes', [])
+        month = request.data.get('month')
+        week_code = request.data.get('week_code')
+        frozen_by = request.data.get('frozen_by', '')
+
+        if not fg_codes or not month or not week_code:
+            return Response(
+                {'error': 'fg_codes (list), month, and week_code are required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        result = PlanFreezeService.bulk_freeze(
+            fg_codes=fg_codes,
+            month=month,
+            week_code=week_code,
+            frozen_by=frozen_by,
+        )
+
+        response_data = {
+            'frozen_count': result['frozen_count'],
+            'items': FGPlanFreezeSerializer(result['items'], many=True).data,
+            'errors': result['errors'],
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+class MondayActionListCreateView(APIView):
+    """
+    D5: GET/POST /api/monday-review-actions/
+    List actions (filtered by month/week/fg) or create a new action (upsert).
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        month = request.query_params.get('month')
+        week_code = request.query_params.get('week_code')
+        fg_code = request.query_params.get('fg_code')
+        action_status = request.query_params.get('status')
+
+        qs = MondayReviewAction.objects.select_related('fg', 'week').all()
+        if month:
+            qs = qs.filter(month=month)
+        if week_code:
+            qs = qs.filter(week_id=week_code)
+        if fg_code:
+            qs = qs.filter(fg_id=fg_code)
+        if action_status:
+            qs = qs.filter(status=action_status)
+
+        serializer = MondayReviewActionSerializer(qs, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        """
+        Upsert behavior: if action exists for (fg_code, week_code, component_code),
+        DELETE existing then INSERT new.
+        """
+        fg_code = request.data.get('fg_code')
+        week_code = request.data.get('week_code')
+        component_code = request.data.get('component_code')
+
+        # Delete existing action for this combination (upsert)
+        if fg_code and week_code:
+            existing = MondayReviewAction.objects.filter(
+                fg_id=fg_code,
+                week_id=week_code,
+            )
+            if component_code:
+                existing = existing.filter(component_code=component_code)
+            else:
+                existing = existing.filter(component_code__isnull=True)
+            deleted_count = existing.delete()[0]
+            if deleted_count:
+                logger.info(f"Upsert: Deleted {deleted_count} existing action(s) for {fg_code}/{week_code}/{component_code}")
+
+        serializer = MondayReviewActionSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MondayActionDetailView(APIView):
+    """
+    D6: PATCH/DELETE /api/monday-review-actions/<id>/
+    Update or delete a single action.
+    """
+    permission_classes = [AllowAny]
+
+    def get_object(self, pk):
+        try:
+            return MondayReviewAction.objects.select_related('fg', 'week').get(pk=pk)
+        except MondayReviewAction.DoesNotExist:
+            return None
+
+    def patch(self, request, pk):
+        action = self.get_object(pk)
+        if not action:
+            return Response({'error': 'Action not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = MondayReviewActionSerializer(action, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        action = self.get_object(pk)
+        if not action:
+            return Response({'error': 'Action not found.'}, status=status.HTTP_404_NOT_FOUND)
+        action.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VendorScheduleListCreateView(APIView):
+    """
+    D7: GET/POST /api/vendor-delivery-schedules/
+    List delivery schedules or create a new one with audit logging.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        component_code = request.query_params.get('component_code')
+        week_code = request.query_params.get('week_code')
+        vendor_name = request.query_params.get('vendor_name')
+        delivery_status_filter = request.query_params.get('delivery_status')
+        po_number = request.query_params.get('po_number')
+
+        qs = VendorDeliverySchedule.objects.select_related('component', 'week').all()
+        if component_code:
+            qs = qs.filter(component_id=component_code)
+        if week_code:
+            qs = qs.filter(week_id=week_code)
+        if vendor_name:
+            qs = qs.filter(vendor_name__icontains=vendor_name)
+        if delivery_status_filter:
+            qs = qs.filter(delivery_status=delivery_status_filter)
+        if po_number:
+            qs = qs.filter(po_number__icontains=po_number)
+
+        serializer = VendorDeliveryScheduleSerializer(qs, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        changed_by = request.data.get('changed_by', 'system')
+        reason = request.data.get('reason_for_change', '')
+
+        if len(reason.strip()) < 10:
+            return Response(
+                {'error': 'reason_for_change is mandatory and must be at least 10 characters.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = VendorDeliveryScheduleSerializer(data=request.data)
+        if serializer.is_valid():
+            schedule = serializer.save()
+            # Create audit log
+            AuditLogService.log_creation(schedule, changed_by, reason)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class VendorScheduleDetailView(APIView):
+    """
+    D8: PATCH/DELETE /api/vendor-delivery-schedules/<id>/
+    Edit or cancel a delivery schedule with mandatory audit logging.
+    """
+    permission_classes = [AllowAny]
+
+    def get_object(self, pk):
+        try:
+            return VendorDeliverySchedule.objects.select_related('component', 'week').get(pk=pk)
+        except VendorDeliverySchedule.DoesNotExist:
+            return None
+
+    def patch(self, request, pk):
+        schedule = self.get_object(pk)
+        if not schedule:
+            return Response({'error': 'Delivery schedule not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        changed_by = request.data.get('changed_by', 'system')
+        reason = request.data.get('reason_for_change', '')
+
+        if len(reason.strip()) < 10:
+            return Response(
+                {'error': 'reason_for_change is mandatory and must be at least 10 characters.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Capture old data before update
+        old_data = {
+            'expected_delivery_date': str(schedule.expected_delivery_date),
+            'promised_qty': float(schedule.promised_qty),
+            'delivery_status': schedule.delivery_status,
+            'vendor_name': schedule.vendor_name,
+            'buyer_name': schedule.buyer_name,
+        }
+
+        serializer = VendorDeliveryScheduleSerializer(schedule, data=request.data, partial=True)
+        if serializer.is_valid():
+            updated = serializer.save()
+            # Create audit log
+            AuditLogService.log_update(updated, old_data, changed_by, reason)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        """Cancel a delivery schedule (set status=CANCELLED, qty=0)."""
+        schedule = self.get_object(pk)
+        if not schedule:
+            return Response({'error': 'Delivery schedule not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        changed_by = request.data.get('changed_by', 'system')
+        reason = request.data.get('reason_for_change', '')
+
+        if len(reason.strip()) < 10:
+            return Response(
+                {'error': 'reason_for_change is mandatory and must be at least 10 characters.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        old_qty = float(schedule.promised_qty)
+        old_status = schedule.delivery_status
+
+        schedule.delivery_status = 'CANCELLED'
+        schedule.promised_qty = 0
+        schedule.save()
+
+        AuditLogService.log_cancellation(schedule, changed_by, reason, old_qty, old_status)
+
+        serializer = VendorDeliveryScheduleSerializer(schedule)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class DeliveryChangeLogListView(APIView):
+    """
+    D9: GET /api/vendor-delivery-schedules/change-logs/
+    Paginated audit trail for delivery schedule changes.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        po_number = request.query_params.get('po_number')
+        component_code = request.query_params.get('component_code')
+        vendor_name = request.query_params.get('vendor_name')
+        schedule_id = request.query_params.get('schedule_id')
+        date_from = request.query_params.get('date_from')
+        date_to = request.query_params.get('date_to')
+
+        qs = DeliveryScheduleChangeLog.objects.all()
+        if po_number:
+            qs = qs.filter(po_number__icontains=po_number)
+        if component_code:
+            qs = qs.filter(component_code=component_code)
+        if vendor_name:
+            qs = qs.filter(vendor_name__icontains=vendor_name)
+        if schedule_id:
+            qs = qs.filter(schedule_id=schedule_id)
+        if date_from:
+            qs = qs.filter(changed_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(changed_at__date__lte=date_to)
+
+        # Paginate
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(qs, request)
+        if page is not None:
+            serializer = DeliveryScheduleChangeLogSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        serializer = DeliveryScheduleChangeLogSerializer(qs[:100], many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)

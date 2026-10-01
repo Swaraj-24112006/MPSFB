@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 from .models import (
     RMPMComponentMaster,
@@ -10,7 +11,11 @@ from .models import (
     WeekDefinition,
     MonthlyPlan,
     MB51Transaction,
-    StockReport
+    StockReport,
+    VendorDeliverySchedule,
+    DeliveryScheduleChangeLog,
+    FGPlanFreeze,
+    MondayReviewAction,
 )
 from core.services.week_service import WeekService
 from core.services.prorate_service import ProrateService
@@ -316,6 +321,8 @@ class WeekDefinitionSerializer(serializers.ModelSerializer):
     - Generates standard week_code (w-{YYYY-MM}-{0N}) on creation.
     - Exposes week_code as read-only.
     """
+    week_label = serializers.CharField(max_length=100, required=False, allow_blank=True)
+
     class Meta:
         model = WeekDefinition
         fields = [
@@ -354,6 +361,7 @@ class WeekDefinitionSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         start_date = attrs.get('start_date') or (self.instance.start_date if self.instance else None)
         end_date = attrs.get('end_date') or (self.instance.end_date if self.instance else None)
+        month = attrs.get('month') or (self.instance.month if self.instance else None)
 
         if not start_date or not end_date:
             raise serializers.ValidationError("Both start_date and end_date are required.")
@@ -361,8 +369,22 @@ class WeekDefinitionSerializer(serializers.ModelSerializer):
         if end_date < start_date:
             raise serializers.ValidationError({"end_date": "End date cannot be earlier than start date."})
 
-        month = attrs.get('month') or (self.instance.month if self.instance else None)
-        week_no = attrs.get('week_no') or (self.instance.week_no if self.instance else None)
+        # Validate dates fall within calendar month boundaries
+        if month:
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            try:
+                WeekService.validate_dates_within_month(month, start_date, end_date)
+            except DjangoValidationError as ex:
+                msg = ex.messages if hasattr(ex, 'messages') else [str(ex)]
+                raise serializers.ValidationError({"start_date": msg})
+
+            # Validate no overlap with other weeks in this month
+            exclude_id = self.instance.pk if self.instance else None
+            try:
+                WeekService.validate_no_overlap(month, start_date, end_date, exclude_id=exclude_id)
+            except DjangoValidationError as ex:
+                msg = ex.messages if hasattr(ex, 'messages') else [str(ex)]
+                raise serializers.ValidationError({"date_range": msg})
 
         # Holiday days
         holiday_days = attrs.get('holiday_days')
@@ -372,12 +394,14 @@ class WeekDefinitionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"holiday_days": "Holiday days cannot be negative."})
 
         # Server-side computation of days_count & working_days
-        days_count, working_days = WeekService.compute_days(start_date, end_date, holiday_days)
+        days_count = WeekService.compute_days_count(start_date, end_date)
+        working_days = WeekService.compute_working_days(days_count, holiday_days)
         attrs['days_count'] = days_count
         attrs['working_days'] = working_days
 
         # Auto-generate week_code on create
         if not self.instance:
+            week_no = attrs.get('week_no')
             if not week_no:
                 raise serializers.ValidationError({"week_no": "week_no is required."})
             attrs['week_code'] = WeekService.generate_week_code(month, week_no)
@@ -394,22 +418,18 @@ class MonthlyPlanSerializer(serializers.ModelSerializer):
     """
     Serializer for MonthlyPlan.
     - weekly_breakdown is exposed as read-only computed field.
-    - fg_code must exist in bom_fg_header and start with '7'.
+    - fg_code must exist in or auto-create bom_fg_header and start with '7'.
     - Auto-computes weekly_breakdown using ProrateService.prorate(monthly_target, weeks).
     """
-    fg_code = serializers.SlugRelatedField(
-        slug_field='fg_code',
-        queryset=BOMFGHeader.objects.all(),
-        source='fg',
-        help_text="Finished Good code from bom_fg_header (must start with '7')"
-    )
-    fg_description = serializers.CharField(source='fg.fg_description', read_only=True)
+    fg_code = serializers.CharField(max_length=50, required=False)
+    fg_description = serializers.CharField(max_length=200, required=False, allow_blank=True)
     customer_name = serializers.CharField(required=False, allow_blank=True, default='')
     month = serializers.CharField(max_length=7)
     monthly_target = serializers.IntegerField(min_value=1)
     uom = serializers.CharField(max_length=20, default='PC', required=False)
     weekly_breakdown = serializers.DictField(read_only=True)
     custom_notes = serializers.CharField(required=False, allow_blank=True, default='')
+    upload_batch_id = serializers.IntegerField(source='upload_batch.id', read_only=True, allow_null=True)
 
     class Meta:
         model = MonthlyPlan
@@ -423,13 +443,14 @@ class MonthlyPlanSerializer(serializers.ModelSerializer):
             'uom',
             'weekly_breakdown',
             'custom_notes',
+            'upload_batch_id',
             'created_at',
             'updated_at',
         ]
         read_only_fields = [
             'id',
-            'fg_description',
             'weekly_breakdown',
+            'upload_batch_id',
             'created_at',
             'updated_at',
         ]
@@ -445,26 +466,34 @@ class MonthlyPlanSerializer(serializers.ModelSerializer):
         return val
 
     def validate(self, attrs):
-        # Determine FG
-        fg = attrs.get('fg') or (self.instance.fg if self.instance else None)
-        if not fg:
-            raise serializers.ValidationError({"fg_code": "Finished Good code is required."})
+        # Determine fg_code
+        fg_code = attrs.get('fg_code')
+        if not fg_code:
+            if self.instance:
+                fg_code = self.instance.fg_id
+            else:
+                raise serializers.ValidationError({"fg_code": "Finished Good code is required."})
 
-        if not fg.fg_code.startswith('7'):
+        fg_code = str(fg_code).strip()
+        if not fg_code.startswith('7'):
             raise serializers.ValidationError({"fg_code": "FG code must start with '7'."})
+        if len(fg_code) > 30:
+            raise serializers.ValidationError({"fg_code": "FG code cannot exceed 30 characters."})
+
+        attrs['fg_code'] = fg_code
 
         # Determine Month
         month = attrs.get('month') or (self.instance.month if self.instance else None)
         if not month:
             raise serializers.ValidationError({"month": "Month is required."})
 
-        # Uniqueness check on (fg, month)
-        qs = MonthlyPlan.objects.filter(fg=fg, month=month)
+        # Uniqueness check on (fg_code, month)
+        qs = MonthlyPlan.objects.filter(fg__fg_code=fg_code, month=month)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
             raise serializers.ValidationError(
-                {"non_field_errors": [f"A monthly plan for Finished Good '{fg.fg_code}' in month '{month}' already exists."]}
+                {"non_field_errors": [f"A monthly plan for Finished Good '{fg_code}' in month '{month}' already exists."]}
             )
 
         # Target check
@@ -484,16 +513,70 @@ class MonthlyPlanSerializer(serializers.ModelSerializer):
         # Auto-compute weekly_breakdown server-side (never accept from client)
         attrs['weekly_breakdown'] = ProrateService.prorate(monthly_target, weeks)
 
-        # Default customer_name if empty
-        if not attrs.get('customer_name') and not (self.instance and self.instance.customer_name):
-            if fg.customer_segment:
-                attrs['customer_name'] = fg.customer_segment
-
         return attrs
 
+    def create(self, validated_data):
+        fg_code = validated_data.pop('fg_code')
+        fg_description = validated_data.pop('fg_description', '')
+        customer_name = validated_data.get('customer_name', '')
+        uom = validated_data.get('uom', 'PC')
+
+        # Get or create BOMFGHeader
+        fg_header, _ = BOMFGHeader.objects.get_or_create(
+            fg_code=fg_code,
+            defaults={
+                'fg_description': fg_description or f"Product {fg_code}",
+                'customer_segment': customer_name,
+                'uom': uom,
+                'active_bom_version': 'v1',
+                'is_active': True,
+            }
+        )
+        if fg_description and (not fg_header.fg_description or fg_header.fg_description.startswith('Product ')):
+            fg_header.fg_description = fg_description
+            fg_header.save(update_fields=['fg_description'])
+
+        if not customer_name and fg_header.customer_segment:
+            validated_data['customer_name'] = fg_header.customer_segment
+
+        validated_data['fg'] = fg_header
+        return MonthlyPlan.objects.create(**validated_data)
+
     def update(self, instance, validated_data):
-        # Ensure weekly_breakdown is updated if target or month changed
+        fg_description = validated_data.pop('fg_description', None)
+        if fg_description and instance.fg:
+            instance.fg.fg_description = fg_description
+            instance.fg.save(update_fields=['fg_description'])
+
         return super().update(instance, validated_data)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['fg_code'] = instance.fg_id
+        data['fg_description'] = instance.fg.fg_description if instance.fg else ''
+        return data
+
+
+class UploadBatchSerializer(serializers.ModelSerializer):
+    """
+    Serializer for UploadBatch audit record.
+    """
+    class Meta:
+        model = UploadBatch
+        fields = [
+            'id',
+            'upload_type',
+            'uploaded_by',
+            'uploaded_at',
+            'file_name',
+            'minio_path',
+            'status',
+            'total_rows',
+            'imported_rows',
+            'error_rows',
+            'error_detail',
+        ]
+        read_only_fields = fields
 
 
 class MB51TransactionSerializer(serializers.ModelSerializer):
@@ -702,5 +785,278 @@ class StockReportSerializer(serializers.ModelSerializer):
 
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stage B — Monday Review Cockpit Serializers
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
+class VendorDeliveryScheduleSerializer(serializers.ModelSerializer):
+    """
+    Serializer for VendorDeliverySchedule.
+    - Resolves week_code server-side from expected_delivery_date
+    - Auto-generates po_number if blank
+    - Accepts component_code as a writable field
+    """
+    component_code = serializers.CharField(source='component_id')
+    week_code = serializers.CharField(source='week_id', read_only=True)
+
+    # For mutations: changed_by and reason_for_change are write-only pass-through fields
+    # They are NOT stored on the schedule itself but used by the view to create audit logs
+    changed_by = serializers.CharField(write_only=True, required=False, default='')
+    reason_for_change = serializers.CharField(write_only=True, required=False, default='')
+
+    class Meta:
+        model = VendorDeliverySchedule
+        fields = [
+            'id',
+            'po_number',
+            'component_code',
+            'vendor_code',
+            'vendor_name',
+            'buyer_name',
+            'expected_delivery_date',
+            'week_code',
+            'promised_qty',
+            'carrier_or_tracking',
+            'delivery_status',
+            'notes',
+            'changed_by',
+            'reason_for_change',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'week_code', 'created_at', 'updated_at']
+
+    def validate_delivery_status(self, value):
+        valid_statuses = [c[0] for c in VendorDeliverySchedule.DELIVERY_STATUS_CHOICES]
+        if value not in valid_statuses:
+            raise serializers.ValidationError(
+                f"Invalid delivery_status '{value}'. Must be one of: {', '.join(valid_statuses)}"
+            )
+        return value
+
+    def validate(self, attrs):
+        # Remove pass-through fields before model save
+        attrs.pop('changed_by', None)
+        attrs.pop('reason_for_change', None)
+
+        # Auto-generate po_number if blank
+        po = attrs.get('component_id', '')
+        if not attrs.get('po_number', '').strip():
+            import uuid
+            attrs['po_number'] = f"PO-AUTO-{uuid.uuid4().hex[:8].upper()}"
+
+        # Resolve week_code from expected_delivery_date
+        delivery_date = attrs.get('expected_delivery_date')
+        if delivery_date:
+            week_code = WeekMappingService.map_to_week(delivery_date)
+            if week_code:
+                attrs['week_id'] = week_code
+            else:
+                attrs['week_id'] = None
+
+        return attrs
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        # Add camelCase aliases for frontend compatibility
+        ret['componentCode'] = instance.component_id
+        ret['weekCode'] = instance.week_id or ''
+        ret['poNumber'] = instance.po_number
+        ret['vendorCode'] = instance.vendor_code
+        ret['vendorName'] = instance.vendor_name
+        ret['buyerName'] = instance.buyer_name
+        ret['expectedDeliveryDate'] = str(instance.expected_delivery_date) if instance.expected_delivery_date else ''
+        ret['promisedQty'] = float(instance.promised_qty)
+        ret['carrierOrTracking'] = instance.carrier_or_tracking
+        ret['deliveryStatus'] = instance.delivery_status
+        return ret
+
+
+class DeliveryScheduleChangeLogSerializer(serializers.ModelSerializer):
+    """
+    Read-only serializer for the delivery schedule audit trail.
+    """
+    schedule_id = serializers.PrimaryKeyRelatedField(source='schedule', read_only=True)
+
+    class Meta:
+        model = DeliveryScheduleChangeLog
+        fields = [
+            'id',
+            'schedule_id',
+            'po_number',
+            'component_code',
+            'vendor_name',
+            'changed_by',
+            'changed_at',
+            'field_changed',
+            'old_value',
+            'new_value',
+            'reason_for_change',
+        ]
+        read_only_fields = fields
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['scheduleId'] = instance.schedule_id
+        ret['poNumber'] = instance.po_number
+        ret['componentCode'] = instance.component_code
+        ret['vendorName'] = instance.vendor_name
+        ret['changedBy'] = instance.changed_by
+        ret['changedAt'] = instance.changed_at.isoformat() if instance.changed_at else ''
+        ret['fieldChanged'] = instance.field_changed
+        ret['oldValue'] = instance.old_value
+        ret['newValue'] = instance.new_value
+        ret['reasonForChange'] = instance.reason_for_change
+        return ret
+
+
+class FGPlanFreezeSerializer(serializers.ModelSerializer):
+    """
+    Serializer for FGPlanFreeze.
+    Validates the state machine: DRAFT → REVIEWED → FROZEN (forward only)
+    FROZEN → DRAFT is the only backward transition allowed (unfreeze).
+    """
+    fg_code = serializers.CharField(source='fg_id')
+    week_code = serializers.CharField(source='week_id')
+
+    class Meta:
+        model = FGPlanFreeze
+        fields = [
+            'id',
+            'fg_code',
+            'month',
+            'week_code',
+            'status',
+            'frozen_at',
+            'frozen_by',
+            'freeze_notes',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'frozen_at', 'created_at', 'updated_at']
+
+    VALID_TRANSITIONS = {
+        None: ['DRAFT', 'REVIEWED', 'FROZEN'],  # New record: any status OK
+        'DRAFT': ['REVIEWED', 'FROZEN'],
+        'REVIEWED': ['FROZEN'],
+        'FROZEN': ['DRAFT'],  # Only unfreeze is allowed
+    }
+
+    def validate_status(self, value):
+        valid_statuses = [c[0] for c in FGPlanFreeze.FREEZE_STATUS_CHOICES]
+        if value not in valid_statuses:
+            raise serializers.ValidationError(
+                f"Invalid status '{value}'. Must be one of: {', '.join(valid_statuses)}"
+            )
+        return value
+
+    def validate(self, attrs):
+        # Validate state machine transitions on update
+        if self.instance:
+            current_status = self.instance.status
+            new_status = attrs.get('status', current_status)
+            allowed = self.VALID_TRANSITIONS.get(current_status, [])
+            if new_status != current_status and new_status not in allowed:
+                raise serializers.ValidationError({
+                    'status': f"Plan freeze status cannot transition from '{current_status}' to '{new_status}'. "
+                              f"Allowed transitions: {', '.join(allowed)}"
+                })
+
+        # Auto-set frozen_at when status transitions to FROZEN
+        new_status = attrs.get('status')
+        if new_status == 'FROZEN':
+            if not self.instance or self.instance.status != 'FROZEN':
+                attrs['frozen_at'] = timezone.now()
+        elif new_status and new_status != 'FROZEN':
+            attrs['frozen_at'] = None
+
+        # Validate monthly_plan exists
+        fg_code = attrs.get('fg_id') or (self.instance.fg_id if self.instance else None)
+        month = attrs.get('month') or (self.instance.month if self.instance else None)
+        if fg_code and month:
+            if not MonthlyPlan.objects.filter(fg_id=fg_code, month=month).exists():
+                raise serializers.ValidationError({
+                    'fg_code': f"No monthly plan exists for FG '{fg_code}' in month '{month}'. Cannot freeze."
+                })
+
+        return attrs
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['fgCode'] = instance.fg_id
+        ret['weekCode'] = instance.week_id
+        ret['frozenAt'] = instance.frozen_at.isoformat() if instance.frozen_at else None
+        ret['frozenBy'] = instance.frozen_by
+        ret['freezeNotes'] = instance.freeze_notes
+        # Include FG description for display
+        if instance.fg:
+            ret['fgDescription'] = instance.fg.fg_description
+            ret['miniFactory'] = instance.fg.mini_factory
+        return ret
+
+
+class MondayReviewActionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for MondayReviewAction.
+    Implements upsert behavior on (fg, week, component_code).
+    """
+    fg_code = serializers.CharField(source='fg_id')
+    week_code = serializers.CharField(source='week_id')
+
+    class Meta:
+        model = MondayReviewAction
+        fields = [
+            'id',
+            'fg_code',
+            'week_code',
+            'month',
+            'component_code',
+            'component_description',
+            'issue_type',
+            'description',
+            'impact_summary',
+            'status',
+            'resolution_notes',
+            'agreed_action',
+            'assigned_owner',
+            'target_resolution_date',
+            'escalated_to',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_issue_type(self, value):
+        valid_types = [c[0] for c in MondayReviewAction.ISSUE_TYPE_CHOICES]
+        if value not in valid_types:
+            raise serializers.ValidationError(
+                f"Invalid issue_type '{value}'. Must be one of: {', '.join(valid_types)}"
+            )
+        return value
+
+    def validate_status(self, value):
+        valid_statuses = [c[0] for c in MondayReviewAction.ACTION_STATUS_CHOICES]
+        if value not in valid_statuses:
+            raise serializers.ValidationError(
+                f"Invalid status '{value}'. Must be one of: {', '.join(valid_statuses)}"
+            )
+        return value
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['fgCode'] = instance.fg_id
+        ret['weekCode'] = instance.week_id
+        ret['componentCode'] = instance.component_code or ''
+        ret['componentDescription'] = instance.component_description
+        ret['issueType'] = instance.issue_type
+        ret['impactSummary'] = instance.impact_summary
+        ret['resolutionNotes'] = instance.resolution_notes
+        ret['agreedAction'] = instance.agreed_action
+        ret['assignedOwner'] = instance.assigned_owner
+        ret['targetResolutionDate'] = str(instance.target_resolution_date) if instance.target_resolution_date else None
+        ret['escalatedTo'] = instance.escalated_to
+        # Include FG description
+        if instance.fg:
+            ret['fgDescription'] = instance.fg.fg_description
+        return ret

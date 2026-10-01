@@ -108,6 +108,23 @@ export const weekService = {
   async autoGenerate(payload: WeekAutoGeneratePayload): Promise<WeekAutoGenerateResponse> {
     return api.post<WeekAutoGenerateResponse>('weeks/auto-generate/', payload);
   },
+
+  /**
+   * Export weeks CSV directly from the backend.
+   */
+  async downloadWeeksCSV(month?: string): Promise<void> {
+    const params: Record<string, string> = {};
+    if (month) params.month = month;
+    const blob = await api.downloadBlob('exports/weeks-csv/', params);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `Weeks_Export_${month || 'all'}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  },
 };
 
 export default weekService;

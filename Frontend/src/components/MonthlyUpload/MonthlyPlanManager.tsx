@@ -200,16 +200,20 @@ export const MonthlyPlanManager: React.FC<MonthlyPlanManagerProps> = ({
   };
 
   const handleRecalculateAllProrated = async () => {
+    setIsSaving(true);
     try {
+      const res = await monthlyPlanService.recalculateProrated(selectedMonth);
       const refreshed = await monthlyPlanService.getMonthlyPlans(selectedMonth);
       if (refreshed.length > 0) {
         const otherMonths = monthlyPlans.filter((p) => p.month !== selectedMonth);
         onUpdateMonthlyPlans([...otherMonths, ...refreshed]);
-        alert(`Successfully synchronized ${refreshed.length} plan(s) from server.`);
-        return;
       }
-    } catch {
-      // Fallback
+      alert(`Successfully recalculated ${res.updated_count} plan(s) for ${selectedMonth} based on active week weights.`);
+      return;
+    } catch (err: any) {
+      console.warn('Backend recalculate failed, falling back to client-side:', err);
+    } finally {
+      setIsSaving(false);
     }
 
     if (monthWeeks.length === 0) {
@@ -297,7 +301,14 @@ export const MonthlyPlanManager: React.FC<MonthlyPlanManagerProps> = ({
     }
   };
 
-  const handleExportCSV = () => {
+  const handleExportCSV = async () => {
+    try {
+      await monthlyPlanService.downloadMonthlyPlanCSV(selectedMonth);
+      return;
+    } catch (err) {
+      console.warn('Backend CSV export failed, falling back to client CSV generation:', err);
+    }
+
     const headers = [
       'FG Code',
       'FG Description',
@@ -325,6 +336,7 @@ export const MonthlyPlanManager: React.FC<MonthlyPlanManagerProps> = ({
     link.href = url;
     link.download = `Monthly_Plan_Weekly_Consolidation_${selectedMonth}.csv`;
     link.click();
+    URL.revokeObjectURL(url);
   };
 
   return (

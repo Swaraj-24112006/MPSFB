@@ -242,7 +242,14 @@ export const WeekDefinitionManager: React.FC<WeekDefinitionManagerProps> = ({
     }
   };
 
-  const handleExportCSV = () => {
+  const handleExportCSV = async () => {
+    try {
+      await weekService.downloadWeeksCSV(selectedMonth);
+      return;
+    } catch (err) {
+      console.warn('Backend weeks CSV export failed, falling back to client CSV generation:', err);
+    }
+
     const headers = [
       'Month',
       'Week Number',
@@ -269,6 +276,7 @@ export const WeekDefinitionManager: React.FC<WeekDefinitionManagerProps> = ({
     link.href = url;
     link.download = `Week_Definitions_${new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
+    URL.revokeObjectURL(url);
   };
 
   return (

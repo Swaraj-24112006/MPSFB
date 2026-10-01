@@ -268,6 +268,9 @@ class MonthlyPlanParser:
         if not fg_code.startswith('7'):
             return {"fg_code": fg_code}, f"FG Code '{fg_code}' does not start with '7' (SAP Finished Goods rule)."
 
+        if len(fg_code) > 30:
+            return {"fg_code": fg_code}, f"FG Code '{fg_code}' too long (maximum 30 characters)."
+
         # Validation Rule 2: monthly_target must be numeric and > 0
         if not target_raw:
             return {"fg_code": fg_code}, "Monthly target is missing."
@@ -291,6 +294,56 @@ class MonthlyPlanParser:
             "uom": uom,
             "custom_notes": custom_notes,
         }, None
+
+    @classmethod
+    def validate_row(cls, row: dict, row_index: int = 1) -> Tuple[bool, str]:
+        """
+        Validates row dict against 5 rules:
+        1. fg_code is non-empty -> "FG Code is required"
+        2. fg_code starts with '7' -> "FG Code must start with '7' (SAP Finished Good rule)"
+        3. fg_code max 30 chars -> "FG Code too long"
+        4. monthly_target is numeric after stripping commas -> "Monthly Target must be a number"
+        5. monthly_target > 0 -> "Monthly Target must be greater than 0"
+        Returns (is_valid, error_reason).
+        """
+        fg_code = str(row.get('fg_code', '')).strip()
+        if not fg_code:
+            return False, "FG Code is required"
+        if not fg_code.startswith('7'):
+            return False, "FG Code must start with '7' (SAP Finished Good rule)"
+        if len(fg_code) > 30:
+            return False, "FG Code too long (maximum 30 characters)"
+
+        raw_target = row.get('monthly_target')
+        if raw_target is None or str(raw_target).strip() == '':
+            return False, "Monthly Target is required"
+
+        try:
+            cleaned = str(raw_target).replace(',', '').replace(' ', '').replace('₹', '').replace('$', '').strip()
+            target_val = float(cleaned)
+        except (ValueError, TypeError):
+            return False, "Monthly Target must be a number"
+
+        if target_val <= 0:
+            return False, "Monthly Target must be greater than 0"
+
+        return True, ""
+
+    @classmethod
+    def parse_csv_file(cls, file_obj: Any) -> List[Dict[str, Any]]:
+        """
+        Parse CSV/Excel file and return list of row dictionaries.
+        """
+        result = cls.parse(file_obj, month='')
+        return result.get('valid_rows', [])
+
+    @classmethod
+    def parse_pasted_text(cls, text: str) -> List[Dict[str, Any]]:
+        """
+        Parse pasted text (TSV/CSV) and return list of row dictionaries.
+        """
+        result = cls.parse(text, month='')
+        return result.get('valid_rows', [])
 
     @classmethod
     def _is_numeric(cls, val: Any) -> bool:
