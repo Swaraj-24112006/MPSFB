@@ -14,6 +14,7 @@ from .plan_freeze_service import PlanFreezeService
 from .cockpit_data_loader import CockpitDataLoaderService
 from .cockpit_engine import CockpitEngineService
 
+from .monthly_plan_distribution_service import MonthlyPlanDistributionService
 from .monthly_plan_upload_service import MonthlyPlanUploadService
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     'UploadBatchService',
     'WeekService',
     'ProrateService',
+    'MonthlyPlanDistributionService',
     'MonthlyPlanParser',
     'MonthlyPlanUploadService',
     'MB51ClassificationService',

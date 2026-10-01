@@ -15,6 +15,7 @@ from core.models import (
 )
 from core.services.week_service import WeekService
 from core.services.prorate_service import ProrateService
+from core.services.monthly_plan_distribution_service import MonthlyPlanDistributionService
 from core.services.monthly_plan_parser import MonthlyPlanParser
 from core.services.monthly_plan_upload_service import MonthlyPlanUploadService
 
@@ -200,8 +201,8 @@ class MonthlyUploadTests(TestCase):
         breakdown = ProrateService.prorate(10000, weeks)
         self.assertEqual(breakdown['w-2026-08-01'], 2308)
         self.assertEqual(breakdown['w-2026-08-02'], 2308)
-        self.assertEqual(breakdown['w-2026-08-03'], 2308)
-        self.assertEqual(breakdown['w-2026-08-04'], 3076)
+        self.assertEqual(breakdown['w-2026-08-03'], 2307)
+        self.assertEqual(breakdown['w-2026-08-04'], 3077)
         self.assertEqual(sum(breakdown.values()), 10000)
 
         # FAM B Tandem Vacuum Pump (target=8,000)
@@ -211,6 +212,186 @@ class MonthlyUploadTests(TestCase):
         self.assertEqual(breakdown_8k['w-2026-08-03'], 1846)
         self.assertEqual(breakdown_8k['w-2026-08-04'], 2462)
         self.assertEqual(sum(breakdown_8k.values()), 8000)
+
+    def test_overshoot_edge_case_largest_remainder_method(self):
+        """
+        Verify the edge case where independent rounding would overshoot the target:
+        Target: 5 units
+        Working days: W1=1, W2=1, W3=1, W4=5, W5=1 (Total = 9)
+
+        Old independent rounding:
+          W1: 5 * 1/9 = 0.556 -> 1
+          W2: 5 * 1/9 = 0.556 -> 1
+          W3: 5 * 1/9 = 0.556 -> 1
+          W4: 5 * 5/9 = 2.778 -> 3
+          Sum so far = 6 (already overshot 5 before reaching W5!).
+          W5: max(0, 5 - 6) = 0 -> Total = 6 (INVALID, target was 5).
+
+        Largest Remainder Method (Hare-Niemeyer):
+          Floors: W1=0, W2=0, W3=0, W4=2, W5=0 (Sum = 2)
+          Leftover = 5 - 2 = 3
+          Top 3 fractional remainders:
+            W4 (0.778) -> +1 = 3
+            W1 (0.556, tie-breaker idx 0) -> +1 = 1
+            W2 (0.556, tie-breaker idx 1) -> +1 = 1
+            W3 (0.556, tie-breaker idx 2) -> +0 = 0
+            W5 (0.556, tie-breaker idx 4) -> +0 = 0
+          Result: W1=1, W2=1, W3=0, W4=3, W5=0 -> Total = 5 (EXACT).
+        """
+        edge_weeks = [
+            {'week_code': 'w-2026-11-01', 'week_no': 1, 'working_days': 1},
+            {'week_code': 'w-2026-11-02', 'week_no': 2, 'working_days': 1},
+            {'week_code': 'w-2026-11-03', 'week_no': 3, 'working_days': 1},
+            {'week_code': 'w-2026-11-04', 'week_no': 4, 'working_days': 5},
+            {'week_code': 'w-2026-11-05', 'week_no': 5, 'working_days': 1},
+        ]
+        breakdown = MonthlyPlanDistributionService.distribute_monthly_target(5, edge_weeks)
+        self.assertEqual(breakdown['w-2026-11-01'], 1)
+        self.assertEqual(breakdown['w-2026-11-02'], 1)
+        self.assertEqual(breakdown['w-2026-11-03'], 0)
+        self.assertEqual(breakdown['w-2026-11-04'], 3)
+        self.assertEqual(breakdown['w-2026-11-05'], 0)
+        self.assertEqual(sum(breakdown.values()), 5)
+
+    def test_user_prompt_worked_example_october_2026(self):
+        """
+        Exact implementation and verification of user specification:
+        Month: 2026-10
+        FG Code: 7.06496.03.0
+        Monthly Target: 10,000
+        Defined Weeks:
+          W1 -> 5 working days
+          W2 -> 6 working days
+          W3 -> 5 working days
+          W4 -> 7 working days
+        Total working days: 23
+        Week Weights:
+          W1 = 5 / 23 = 21.739%
+          W2 = 6 / 23 = 26.087%
+          W3 = 5 / 23 = 21.739%
+          W4 = 7 / 23 = 30.435%
+        Weekly targets:
+          W1 = round(10000 * 5/23) = 2174
+          W2 = round(10000 * 6/23) = 2609
+          W3 = round(10000 * 5/23) = 2174
+          W4 = 10000 - (2174 + 2609 + 2174) = 3043
+        Total sum = 10,000
+        """
+        oct_weeks = [
+            {'week_code': 'w-2026-10-01', 'week_no': 1, 'working_days': 5},
+            {'week_code': 'w-2026-10-02', 'week_no': 2, 'working_days': 6},
+            {'week_code': 'w-2026-10-03', 'week_no': 3, 'working_days': 5},
+            {'week_code': 'w-2026-10-04', 'week_no': 4, 'working_days': 7},
+        ]
+
+        # 1. Test week weights
+        weights = MonthlyPlanDistributionService.calculate_week_weights(oct_weeks)
+        self.assertAlmostEqual(weights['w-2026-10-01'], 5 / 23, places=4)
+        self.assertAlmostEqual(weights['w-2026-10-02'], 6 / 23, places=4)
+        self.assertAlmostEqual(weights['w-2026-10-03'], 5 / 23, places=4)
+        self.assertAlmostEqual(weights['w-2026-10-04'], 7 / 23, places=4)
+
+        # 2. Test distribution service with target 10,000
+        breakdown = MonthlyPlanDistributionService.distribute_monthly_target(10000, oct_weeks)
+        self.assertEqual(breakdown['w-2026-10-01'], 2174)
+        self.assertEqual(breakdown['w-2026-10-02'], 2609)
+        self.assertEqual(breakdown['w-2026-10-03'], 2174)
+        self.assertEqual(breakdown['w-2026-10-04'], 3043)
+        self.assertEqual(sum(breakdown.values()), 10000)
+
+        # Also test via ProrateService wrapper
+        wrapper_breakdown = ProrateService.prorate(10000, oct_weeks)
+        self.assertEqual(wrapper_breakdown, breakdown)
+
+    def test_distribution_with_arbitrary_targets(self):
+        """
+        Test distribution with different target values (15,000 and odd number 7,777)
+        using the 23 working-day structure (5, 6, 5, 7).
+        """
+        oct_weeks = [
+            {'week_code': 'w-2026-10-01', 'week_no': 1, 'working_days': 5},
+            {'week_code': 'w-2026-10-02', 'week_no': 2, 'working_days': 6},
+            {'week_code': 'w-2026-10-03', 'week_no': 3, 'working_days': 5},
+            {'week_code': 'w-2026-10-04', 'week_no': 4, 'working_days': 7},
+        ]
+
+        # Target = 15,000
+        # W1: round(15000 * 5/23) = 3261
+        # W2: round(15000 * 6/23) = 3913
+        # W3: round(15000 * 5/23) = 3261
+        # W4: 15000 - (3261 + 3913 + 3261) = 4565
+        res_15k = MonthlyPlanDistributionService.distribute_monthly_target(15000, oct_weeks)
+        self.assertEqual(res_15k['w-2026-10-01'], 3261)
+        self.assertEqual(res_15k['w-2026-10-02'], 3913)
+        self.assertEqual(res_15k['w-2026-10-03'], 3261)
+        self.assertEqual(res_15k['w-2026-10-04'], 4565)
+        self.assertEqual(sum(res_15k.values()), 15000)
+
+        # Target = 7,777 (odd number remainder verification)
+        # Exact: W1=1690.65, W2=2028.78, W3=1690.65, W4=2366.91
+        # Floors: W1=1690, W2=2028, W3=1690, W4=2366 (Sum=7774, leftover=3)
+        # Top remainders: W4 (0.91), W2 (0.78), W1 (0.65, tie-break idx 0)
+        res_7777 = MonthlyPlanDistributionService.distribute_monthly_target(7777, oct_weeks)
+        self.assertEqual(res_7777['w-2026-10-01'], 1691)
+        self.assertEqual(res_7777['w-2026-10-02'], 2029)
+        self.assertEqual(res_7777['w-2026-10-03'], 1690)
+        self.assertEqual(res_7777['w-2026-10-04'], 2367)
+        self.assertEqual(sum(res_7777.values()), 7777)
+
+    def test_recalculation_on_monthly_target_change(self):
+        """
+        Step 8: When monthly target changes:
+        Monthly Target changed -> Recalculate weekly distribution -> Update weekly_breakdown
+        """
+        month = '2026-10'
+        # Create week records in database
+        w1 = WeekDefinition.objects.create(
+            month=month, week_no=1, week_code='w-2026-10-01', week_label='W1',
+            start_date=date(2026, 10, 1), end_date=date(2026, 10, 7),
+            days_count=7, holiday_days=2, working_days=5
+        )
+        w2 = WeekDefinition.objects.create(
+            month=month, week_no=2, week_code='w-2026-10-02', week_label='W2',
+            start_date=date(2026, 10, 8), end_date=date(2026, 10, 14),
+            days_count=7, holiday_days=1, working_days=6
+        )
+        w3 = WeekDefinition.objects.create(
+            month=month, week_no=3, week_code='w-2026-10-03', week_label='W3',
+            start_date=date(2026, 10, 15), end_date=date(2026, 10, 21),
+            days_count=7, holiday_days=2, working_days=5
+        )
+        w4 = WeekDefinition.objects.create(
+            month=month, week_no=4, week_code='w-2026-10-04', week_label='W4',
+            start_date=date(2026, 10, 22), end_date=date(2026, 10, 31),
+            days_count=10, holiday_days=3, working_days=7
+        )
+
+        # Create monthly plan with target 10,000 via API
+        create_res = self.client.post('/api/monthly-plans/', {
+            'fg_code': self.fg1.fg_code,
+            'month': month,
+            'monthly_target': 10000,
+        }, format='json')
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        plan_id = create_res.json()['id']
+        breakdown_initial = create_res.json()['weekly_breakdown']
+        self.assertEqual(breakdown_initial['w-2026-10-01'], 2174)
+        self.assertEqual(breakdown_initial['w-2026-10-02'], 2609)
+        self.assertEqual(breakdown_initial['w-2026-10-03'], 2174)
+        self.assertEqual(breakdown_initial['w-2026-10-04'], 3043)
+        self.assertEqual(sum(breakdown_initial.values()), 10000)
+
+        # Update target from 10,000 to 15,000
+        patch_res = self.client.patch(f'/api/monthly-plans/{plan_id}/', {
+            'monthly_target': 15000,
+        }, format='json')
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+        breakdown_updated = patch_res.json()['weekly_breakdown']
+        self.assertEqual(breakdown_updated['w-2026-10-01'], 3261)
+        self.assertEqual(breakdown_updated['w-2026-10-02'], 3913)
+        self.assertEqual(breakdown_updated['w-2026-10-03'], 3261)
+        self.assertEqual(breakdown_updated['w-2026-10-04'], 4565)
+        self.assertEqual(sum(breakdown_updated.values()), 15000)
 
     def test_cascade_reprorate_on_week_update(self):
         """Updating a week's holiday days cascades re-proration to all monthly plans"""
@@ -222,7 +403,7 @@ class MonthlyUploadTests(TestCase):
             monthly_target=10000,
             weekly_breakdown=ProrateService.prorate(10000, WeekDefinition.objects.filter(month=self.month))
         )
-        self.assertEqual(plan.weekly_breakdown['w-2026-08-04'], 3076)
+        self.assertEqual(plan.weekly_breakdown['w-2026-08-04'], 3077)
 
         # Update W4 holiday days from 2 to 4 (working days decreases from 8 to 6)
         # Total working days becomes 6 + 6 + 6 + 6 = 24
@@ -254,12 +435,12 @@ class MonthlyUploadTests(TestCase):
         self.assertEqual(del_res.status_code, status.HTTP_200_OK)
 
         # Now only 3 weeks (6, 6, 6 working days, total 18)
-        # round(10000 * 6/18) = 3333, last week gets 10000 - 6666 = 3334
+        # 10000 / 18 * 6 = 3333.33 -> floor 3333, leftover 1 allocated to W1 by tie-breaker (idx 0)
         plan.refresh_from_db()
         self.assertNotIn('w-2026-08-04', plan.weekly_breakdown)
-        self.assertEqual(plan.weekly_breakdown['w-2026-08-01'], 3333)
+        self.assertEqual(plan.weekly_breakdown['w-2026-08-01'], 3334)
         self.assertEqual(plan.weekly_breakdown['w-2026-08-02'], 3333)
-        self.assertEqual(plan.weekly_breakdown['w-2026-08-03'], 3334)
+        self.assertEqual(plan.weekly_breakdown['w-2026-08-03'], 3333)
         self.assertEqual(sum(plan.weekly_breakdown.values()), 10000)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -478,7 +659,7 @@ class MonthlyUploadTests(TestCase):
         # Check data row contains prorated numbers
         self.assertIn('7.06496.03.0', lines[1])
         self.assertIn('2308', lines[1])
-        self.assertIn('3076', lines[1])
+        self.assertIn('3077', lines[1])
 
     def test_recalculate_weeks_endpoint(self):
         """Recalculate endpoint re-runs proration across all plans for month"""

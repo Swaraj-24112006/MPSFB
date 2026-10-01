@@ -353,21 +353,43 @@ export function calculateProratedWeeklyBreakdown(
   monthlyTarget: number,
   weeks: WeekDefinition[]
 ): Record<string, number> {
-  const totalWorkingDays = weeks.reduce((sum, w) => sum + (w.workingDays || w.daysCount), 0);
-  if (totalWorkingDays === 0 || weeks.length === 0) return {};
+  if (!weeks || weeks.length === 0 || !monthlyTarget || monthlyTarget <= 0) return {};
+
+  const sortedWeeks = [...weeks].sort((a, b) => a.weekNo - b.weekNo);
+  const totalWorkingDays = sortedWeeks.reduce((sum, w) => sum + (w.workingDays || w.daysCount), 0);
+  if (totalWorkingDays <= 0) return {};
+
+  const allocations = sortedWeeks.map((week, idx) => {
+    const workingDays = week.workingDays || week.daysCount;
+    const exactVal = monthlyTarget * (workingDays / totalWorkingDays);
+    const floorVal = Math.floor(exactVal);
+    const remainder = exactVal - floorVal;
+    return {
+      id: week.id,
+      target: floorVal,
+      remainder,
+      originalIdx: idx,
+    };
+  });
+
+  const leftover = monthlyTarget - allocations.reduce((sum, a) => sum + a.target, 0);
+
+  if (leftover > 0) {
+    const byRemainder = [...allocations].sort((a, b) => {
+      if (b.remainder !== a.remainder) {
+        return b.remainder - a.remainder;
+      }
+      return a.originalIdx - b.originalIdx;
+    });
+
+    for (let i = 0; i < leftover; i++) {
+      byRemainder[i].target += 1;
+    }
+  }
 
   const breakdown: Record<string, number> = {};
-  let accumulated = 0;
-
-  weeks.forEach((week, idx) => {
-    const workingDays = week.workingDays || week.daysCount;
-    if (idx === weeks.length - 1) {
-      breakdown[week.id] = Math.max(0, monthlyTarget - accumulated);
-    } else {
-      const calculated = Math.round(monthlyTarget * (workingDays / totalWorkingDays));
-      breakdown[week.id] = calculated;
-      accumulated += calculated;
-    }
+  allocations.forEach((item) => {
+    breakdown[item.id] = item.target;
   });
 
   return breakdown;
