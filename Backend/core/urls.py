@@ -33,6 +33,7 @@ from .views import (
     StockExportCSVView,
     # Monday Review Cockpit views
     MondayReviewCockpitView,
+    MondayReviewCockpitExportCSVView,
     PlanFreezeListView,
     PlanFreezeUpdateView,
     PlanFreezeBulkView,
@@ -99,10 +100,10 @@ urlpatterns = [
     # ─── Monday Review Cockpit ───────────────────────────────────────────
     # D1: Main cockpit computation
     path('reports/monday-review-cockpit/', MondayReviewCockpitView.as_view(), name='monday_review_cockpit'),
+    path('reports/monday-review-cockpit/export-csv/', MondayReviewCockpitExportCSVView.as_view(), name='cockpit_export_csv'),
 
-    # D2-D4: Plan Freeze (list, single, bulk)
-    path('plan-freeze/', PlanFreezeListView.as_view(), name='plan_freeze_list'),
-    path('plan-freeze/update/', PlanFreezeUpdateView.as_view(), name='plan_freeze_update'),
+    # D2-D4: Plan Freeze (list+upsert on same path, bulk separate)
+    path('plan-freeze/', PlanFreezeListView.as_view(), name='plan_freeze'),
     path('plan-freeze/bulk/', PlanFreezeBulkView.as_view(), name='plan_freeze_bulk'),
 
     # D5-D6: Monday Review Actions

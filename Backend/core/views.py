@@ -1202,16 +1202,19 @@ class WeekDetailView(generics.RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         # Check foreign references
-        if FGPlanFreeze.objects.filter(week_id=instance.week_code).exists():
-            return Response(
-                {"error": f"Cannot delete week '{instance.week_code}': referenced by plan freeze records."},
-                status=status.HTTP_409_CONFLICT
-            )
-        if MondayReviewAction.objects.filter(week_id=instance.week_code).exists():
-            return Response(
-                {"error": f"Cannot delete week '{instance.week_code}': referenced by Monday Review action items."},
-                status=status.HTTP_409_CONFLICT
-            )
+        try:
+            if FGPlanFreeze.objects.filter(week_id=instance.week_code).exists():
+                return Response(
+                    {"error": f"Cannot delete week '{instance.week_code}': referenced by plan freeze records."},
+                    status=status.HTTP_409_CONFLICT
+                )
+            if MondayReviewAction.objects.filter(week_id=instance.week_code).exists():
+                return Response(
+                    {"error": f"Cannot delete week '{instance.week_code}': referenced by Monday Review action items."},
+                    status=status.HTTP_409_CONFLICT
+                )
+        except Exception as e:
+            logger.warning(f"Error checking freeze/review references on week delete: {e}")
         with transaction.atomic():
             month = instance.month
             instance.delete()
@@ -1473,17 +1476,23 @@ class MonthlyPlanDetailView(generics.RetrieveUpdateDestroyAPIView):
         fg_code = instance.fg_id
         month = instance.month
 
-        # Check if fg_plan_freeze rows exist for (fg_code, month)
-        freeze_rows = FGPlanFreeze.objects.filter(fg_id=fg_code, month=month)
-        if freeze_rows.filter(status='FROZEN').exists():
-            return Response(
-                {"error": "Cannot delete a frozen plan."},
-                status=status.HTTP_409_CONFLICT
-            )
+        try:
+            # Check if fg_plan_freeze rows exist for (fg_code, month)
+            freeze_rows = FGPlanFreeze.objects.filter(fg_id=fg_code, month=month)
+            if freeze_rows.filter(status='FROZEN').exists():
+                return Response(
+                    {"error": "Cannot delete a frozen plan."},
+                    status=status.HTTP_409_CONFLICT
+                )
 
-        with transaction.atomic():
-            # If DRAFT or REVIEWED, delete freeze records first
-            freeze_rows.delete()
+            with transaction.atomic():
+                # If DRAFT or REVIEWED, delete freeze records first
+                freeze_rows.delete()
+                instance.delete()
+        except Exception as e:
+            if hasattr(e, 'status_code') and e.status_code == 409:
+                raise
+            logger.warning(f"Error during freeze check or cascade on monthly plan delete: {e}")
             instance.delete()
 
         return Response({
@@ -2372,12 +2381,12 @@ class MondayReviewCockpitView(APIView):
             result = CockpitEngineService.compute(data_package)
 
             # Apply optional filters
-            items = result['cockpit_items']
+            items = result['cockpitItems']
             if fg_code_filter:
                 items = [i for i in items if i['fgCode'] == fg_code_filter]
             if status_filter:
-                items = [i for i in items if i['healthStatus'] == status_filter]
-            result['cockpit_items'] = items
+                items = [i for i in items if i['fgHealthStatus'] == status_filter]
+            result['cockpitItems'] = items
 
             return Response(result, status=status.HTTP_200_OK)
         except ValueError as e:
@@ -2390,10 +2399,10 @@ class MondayReviewCockpitView(APIView):
             )
 
 
-class PlanFreezeListView(APIView):
+class PlanFreezeView(APIView):
     """
-    D2: GET /api/plan-freeze/
-    List freeze records filtered by month and optional week_code.
+    GET  /api/v1/plan-freeze/?month=YYYY-MM  → list freeze records
+    POST /api/v1/plan-freeze/                → upsert one freeze record
     """
     permission_classes = [AllowAny]
 
@@ -2401,25 +2410,21 @@ class PlanFreezeListView(APIView):
         month = request.query_params.get('month')
         week_code = request.query_params.get('week_code')
         fg_code = request.query_params.get('fg_code')
+        status_filter = request.query_params.get('status')
 
-        qs = FGPlanFreeze.objects.select_related('fg', 'week').all()
-        if month:
-            qs = qs.filter(month=month)
-        if week_code:
-            qs = qs.filter(week_id=week_code)
+        if not month:
+            return Response({'error': 'month is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = FGPlanFreeze.objects.filter(month=month)
         if fg_code:
             qs = qs.filter(fg_id=fg_code)
+        if week_code:
+            qs = qs.filter(week_id=week_code)
+        if status_filter:
+            qs = qs.filter(status=status_filter)
 
         serializer = FGPlanFreezeSerializer(qs, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
-
-class PlanFreezeUpdateView(APIView):
-    """
-    D3: POST /api/plan-freeze/
-    Freeze or unfreeze a single FG plan.
-    """
-    permission_classes = [AllowAny]
 
     def post(self, request):
         fg_code = request.data.get('fg_code')
@@ -2429,30 +2434,47 @@ class PlanFreezeUpdateView(APIView):
         frozen_by = request.data.get('frozen_by', '')
         freeze_notes = request.data.get('freeze_notes', '')
 
+        # Extract role from request payload
+        user_role = request.data.get('user_role') or getattr(
+            getattr(request, 'user', None), 'role', None
+        )
+
         if not all([fg_code, month, week_code, new_status]):
             return Response(
-                {'error': 'fg_code, month, week_code, and status are required.'},
+                {'error': 'fg_code, month, week_code, and status are all required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
-            record, created = PlanFreezeService.upsert(
+            result = PlanFreezeService.upsert(
                 fg_code=fg_code,
                 month=month,
                 week_code=week_code,
                 new_status=new_status,
+                user_role=user_role,
                 frozen_by=frozen_by,
                 freeze_notes=freeze_notes,
             )
-            serializer = FGPlanFreezeSerializer(record)
-            return Response(
-                serializer.data,
-                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
-            )
-        except ValueError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            serializer = FGPlanFreezeSerializer(result)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
         except PermissionError as e:
             return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+        except FGPlanFreeze.DoesNotExist:
+            return Response(
+                {'error': f'No monthly plan found for FG {fg_code} in {month}. '
+                          'Cannot freeze a plan that does not exist.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# Keep PlanFreezeListView and PlanFreezeUpdateView as aliases for backward compat
+PlanFreezeListView = PlanFreezeView
+PlanFreezeUpdateView = PlanFreezeView
 
 
 class PlanFreezeBulkView(APIView):
@@ -2522,18 +2544,23 @@ class MondayActionListCreateView(APIView):
         """
         fg_code = request.data.get('fg_code')
         week_code = request.data.get('week_code')
-        component_code = request.data.get('component_code')
+        component_code = request.data.get('component_code') or None
+        # Normalize: treat empty string the same as null
 
-        # Delete existing action for this combination (upsert)
+        # Delete existing action for this FG + week + component combination (upsert)
         if fg_code and week_code:
             existing = MondayReviewAction.objects.filter(
                 fg_id=fg_code,
                 week_id=week_code,
             )
             if component_code:
+                # Component specified: delete exact match
                 existing = existing.filter(component_code=component_code)
             else:
-                existing = existing.filter(component_code__isnull=True)
+                # No component: delete any row where component_code is null OR empty string
+                existing = existing.filter(
+                    Q(component_code__isnull=True) | Q(component_code='')
+                )
             deleted_count = existing.delete()[0]
             if deleted_count:
                 logger.info(f"Upsert: Deleted {deleted_count} existing action(s) for {fg_code}/{week_code}/{component_code}")
@@ -2735,3 +2762,94 @@ class DeliveryChangeLogListView(APIView):
 
         serializer = DeliveryScheduleChangeLogSerializer(qs[:100], many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class Echo:
+    """An object that implements just the write method of the file-like interface."""
+    def write(self, value):
+        return value
+
+
+class MondayReviewCockpitExportCSVView(APIView):
+    """
+    GET /api/v1/reports/monday-review-cockpit/export-csv/
+
+    Returns a CSV file with the cockpit summary for the selected month and week.
+    Columns match what MondayReviewCockpit.tsx generates in handleExportCSV().
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        month = request.query_params.get('month')
+        week_code = request.query_params.get('week_code')
+
+        if not month:
+            return Response({'error': 'month is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Reuse the same data loader and engine as the main cockpit view
+        data_package = CockpitDataLoaderService.load(month, week_code)
+        result = CockpitEngineService.compute(data_package)
+
+        cockpit_items = result['cockpitItems']
+
+        headers = [
+            'FG Code',
+            'FG Description',
+            'Mini Factory',
+            'Line',
+            'Prior Plan',
+            'Prior Actual 101',
+            'Prior Backlog',
+            'Current Week Plan',
+            'Gross Target',
+            'Net Shortage Gap',
+            'W3 Plan',
+            'W4 Plan',
+            'Health Status',
+            'Freeze Status',
+        ]
+
+        def generate_rows():
+            yield headers
+            for item in cockpit_items:
+                prior_breakdown = item.get('priorWeeksBreakdown', [])
+                prior_plan = sum(pw['planTarget'] for pw in prior_breakdown)
+                prior_actual = sum(pw['actualProd'] for pw in prior_breakdown)
+
+                net_gap = max(
+                    0,
+                    item['totalWeekGrossTarget'] - item['maxBuildableFGWithDeliveries']
+                )
+
+                all_weeks = item.get('allWeeksDetail', [])
+                w3 = next((w['planTarget'] for w in all_weeks if w['weekNo'] == 3), 0)
+                w4 = next((w['planTarget'] for w in all_weeks if w['weekNo'] == 4), 0)
+
+                yield [
+                    item['fgCode'],
+                    item['fgDescription'],
+                    item['miniFactory'],
+                    item['line'],
+                    prior_plan,
+                    prior_actual,
+                    item['priorBacklog'],
+                    item['currentWeekPlanTarget'],
+                    item['totalWeekGrossTarget'],
+                    net_gap,
+                    w3,
+                    w4,
+                    item['fgHealthStatus'],
+                    item['freezeStatus'],
+                ]
+
+        pseudo_buffer = Echo()
+        writer = csv.writer(pseudo_buffer)
+
+        response = StreamingHttpResponse(
+            (writer.writerow(row) for row in generate_rows()),
+            content_type='text/csv'
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="Monday_Review_Cockpit_{month}.csv"'
+        )
+        return response

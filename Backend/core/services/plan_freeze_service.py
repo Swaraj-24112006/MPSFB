@@ -42,7 +42,8 @@ class PlanFreezeService:
         :param frozen_by: Name/role of the person performing the action
         :param freeze_notes: Optional notes
         :param user_role: Role of the user (for access control)
-        :return: (FGPlanFreeze instance, created: bool)
+        :return: FGPlanFreeze instance
+        :raises FGPlanFreeze.DoesNotExist: On missing monthly plan (callers should return 404)
         :raises ValueError: On invalid transitions or missing prerequisites
         :raises PermissionError: On unauthorized role
         """
@@ -63,64 +64,52 @@ class PlanFreezeService:
         if not WeekDefinition.objects.filter(week_code=week_code).exists():
             raise ValueError(f"Week code '{week_code}' not found in Week Definitions.")
 
-        # Validate monthly plan exists
+        # Validate monthly plan exists — raise DoesNotExist for 404 (not ValueError for 400)
         if not MonthlyPlan.objects.filter(fg_id=fg_code, month=month).exists():
-            raise ValueError(
-                f"No monthly plan exists for FG '{fg_code}' in month '{month}'. "
-                f"Cannot freeze a nonexistent plan."
+            raise FGPlanFreeze.DoesNotExist(
+                f"No monthly plan for fg_code={fg_code}, month={month}"
             )
 
-        # Check for existing record
-        existing = FGPlanFreeze.objects.filter(
-            fg_id=fg_code,
-            month=month,
-            week_id=week_code
-        ).first()
-
-        if existing:
-            # Validate state machine transition
-            current_status = existing.status
-            allowed = cls.VALID_TRANSITIONS.get(current_status, [])
-            if new_status not in allowed and new_status != current_status:
-                raise ValueError(
-                    f"Plan freeze status cannot transition from '{current_status}' to '{new_status}'. "
-                    f"Allowed transitions from '{current_status}': {', '.join(allowed)}"
-                )
-
-            # Update existing record
-            existing.status = new_status
-            existing.frozen_by = frozen_by or existing.frozen_by
-            existing.freeze_notes = freeze_notes or existing.freeze_notes
-
-            if new_status == 'FROZEN' and current_status != 'FROZEN':
-                existing.frozen_at = timezone.now()
-            elif new_status != 'FROZEN':
-                existing.frozen_at = None
-
-            existing.save()
-            logger.info(
-                f"PlanFreeze updated: {fg_code} | {month} | {week_code} → {new_status} by {frozen_by}"
-            )
-            return existing, False
-
-        else:
-            # Create new record
-            freeze_record = FGPlanFreeze(
+        from django.db import transaction
+        with transaction.atomic():
+            record, _ = FGPlanFreeze.objects.get_or_create(
                 fg_id=fg_code,
                 month=month,
                 week_id=week_code,
-                status=new_status,
-                frozen_by=frozen_by,
-                freeze_notes=freeze_notes,
+                defaults={'status': 'DRAFT'}
             )
-            if new_status == 'FROZEN':
-                freeze_record.frozen_at = timezone.now()
 
-            freeze_record.save()
+            current_status = record.status
+
+            # Allow same-status re-submission without error (idempotent)
+            if current_status == new_status:
+                return record
+
+            # Validate forward-only transitions
+            allowed = cls.VALID_TRANSITIONS.get(current_status, [])
+            if new_status not in allowed:
+                raise ValueError(
+                    f"Cannot transition from {current_status} to {new_status}. "
+                    f"Allowed transitions from {current_status}: {', '.join(allowed)}"
+                )
+
+            record.status = new_status
+
+            if new_status == 'FROZEN':
+                record.frozen_at = timezone.now()
+                record.frozen_by = frozen_by
+                record.freeze_notes = freeze_notes
+            elif new_status == 'DRAFT':
+                # Unfreeze — clear frozen metadata
+                record.frozen_at = None
+                record.frozen_by = ''
+                record.freeze_notes = ''
+
+            record.save()
             logger.info(
-                f"PlanFreeze created: {fg_code} | {month} | {week_code} → {new_status} by {frozen_by}"
+                f"PlanFreeze upsert: {fg_code} | {month} | {week_code} → {new_status} by {frozen_by}"
             )
-            return freeze_record, True
+            return record
 
     @classmethod
     def bulk_freeze(cls, fg_codes, month, week_code, frozen_by='', user_role=None):
@@ -138,7 +127,7 @@ class PlanFreezeService:
         errors = []
         for fg_code in fg_codes:
             try:
-                record, created = cls.upsert(
+                record = cls.upsert(
                     fg_code=fg_code,
                     month=month,
                     week_code=week_code,

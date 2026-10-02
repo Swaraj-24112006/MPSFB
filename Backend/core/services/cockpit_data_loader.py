@@ -111,14 +111,38 @@ class CockpitDataLoaderService:
             }
 
         # ── Dict F: Vendor delivery schedules by (component_code, week_code)
+        # Match by week_code OR by expected_delivery_date falling within a week range
+        from django.db.models import Q as DQ
+        week_date_q = DQ()
+        for w in month_weeks:
+            week_date_q |= DQ(
+                expected_delivery_date__gte=w.start_date,
+                expected_delivery_date__lte=w.end_date
+            )
+
         schedules_qs = (
             VendorDeliverySchedule.objects
             .exclude(delivery_status='CANCELLED')
-            .filter(week_id__in=week_codes)
+            .filter(DQ(week_id__in=week_codes) | week_date_q)
+            .distinct()
         )
         schedules_by_comp_week = defaultdict(list)
         for s in schedules_qs:
-            key = (s.component_id, s.week_id)
+            # Resolve which week this schedule belongs to
+            resolved_week_code = s.week_id
+
+            if not resolved_week_code:
+                # week_code is null — resolve from expected_delivery_date
+                for w in month_weeks:
+                    if w.start_date <= s.expected_delivery_date <= w.end_date:
+                        resolved_week_code = w.week_code
+                        break
+
+            if not resolved_week_code:
+                # Date is outside all defined weeks — skip this schedule
+                continue
+
+            key = (s.component_id, resolved_week_code)
             schedules_by_comp_week[key].append(s)
 
         # ── Dict G: Vendor-buyer mapping by component_code ───────────────
