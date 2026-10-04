@@ -860,7 +860,9 @@ class VendorDeliveryScheduleSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         # Add camelCase aliases for frontend compatibility
+        ret['id'] = str(instance.id)
         ret['componentCode'] = instance.component_id
+        ret['weekId'] = instance.week_id or ''
         ret['weekCode'] = instance.week_id or ''
         ret['poNumber'] = instance.po_number
         ret['vendorCode'] = instance.vendor_code
@@ -868,8 +870,9 @@ class VendorDeliveryScheduleSerializer(serializers.ModelSerializer):
         ret['buyerName'] = instance.buyer_name
         ret['expectedDeliveryDate'] = str(instance.expected_delivery_date) if instance.expected_delivery_date else ''
         ret['promisedQty'] = float(instance.promised_qty)
-        ret['carrierOrTracking'] = instance.carrier_or_tracking
+        ret['carrierOrTracking'] = instance.carrier_or_tracking or ''
         ret['deliveryStatus'] = instance.delivery_status
+        ret['notes'] = instance.notes or ''
         return ret
 
 
@@ -886,6 +889,7 @@ class DeliveryScheduleChangeLogSerializer(serializers.ModelSerializer):
             'schedule_id',
             'po_number',
             'component_code',
+            'component_description',
             'vendor_name',
             'changed_by',
             'changed_at',
@@ -901,6 +905,7 @@ class DeliveryScheduleChangeLogSerializer(serializers.ModelSerializer):
         ret['scheduleId'] = instance.schedule_id
         ret['poNumber'] = instance.po_number
         ret['componentCode'] = instance.component_code
+        ret['componentDescription'] = instance.component_description or ''
         ret['vendorName'] = instance.vendor_name
         ret['changedBy'] = instance.changed_by
         ret['changedAt'] = instance.changed_at.isoformat() if instance.changed_at else ''

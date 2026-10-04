@@ -680,6 +680,14 @@ class VendorDeliverySchedule(models.Model):
         default='',
         help_text="Free-text notes about this delivery"
     )
+    upload_batch = models.ForeignKey(
+        UploadBatch,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='vendor_delivery_schedules',
+        help_text="Upload batch audit reference for bulk imports"
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -738,6 +746,12 @@ class DeliveryScheduleChangeLog(models.Model):
         max_length=100,
         db_index=True,
         help_text="Denormalized component code for audit persistence"
+    )
+    component_description = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Denormalized component description for audit display"
     )
     vendor_name = models.CharField(
         max_length=255,

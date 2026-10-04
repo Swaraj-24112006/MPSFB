@@ -39,9 +39,15 @@ from .views import (
     PlanFreezeBulkView,
     MondayActionListCreateView,
     MondayActionDetailView,
+    ConsolidatedMatrixView,
     VendorScheduleListCreateView,
     VendorScheduleDetailView,
+    VendorScheduleBulkUploadView,
+    AutoFillDeficitsView,
     DeliveryChangeLogListView,
+    VendorScheduleBlankTemplateView,
+    VendorSchedulePrefilledTemplateView,
+    VendorScheduleMatrixExportView,
 )
 
 
@@ -110,10 +116,61 @@ urlpatterns = [
     path('monday-review-actions/', MondayActionListCreateView.as_view(), name='monday_action_list_create'),
     path('monday-review-actions/<int:pk>/', MondayActionDetailView.as_view(), name='monday_action_detail'),
 
-    # D7-D8: Vendor Delivery Schedules
-    path('vendor-delivery-schedules/', VendorScheduleListCreateView.as_view(), name='vendor_schedule_list_create'),
-    path('vendor-delivery-schedules/<int:pk>/', VendorScheduleDetailView.as_view(), name='vendor_schedule_detail'),
+    # ─── Vendor Delivery Schedules (Update Delivery Schedule Tab) ────────
+    # Consolidated matrix computation
+    path(
+        'vendor-schedule/consolidated-matrix/',
+        ConsolidatedMatrixView.as_view(),
+        name='vendor-schedule-matrix'
+    ),
 
-    # D9: Delivery Schedule Change Logs (audit trail)
-    path('vendor-delivery-schedules/change-logs/', DeliveryChangeLogListView.as_view(), name='delivery_change_log_list'),
+    # Bulk upload
+    path(
+        'uploads/vendor-delivery-schedules/',
+        VendorScheduleBulkUploadView.as_view(),
+        name='vendor-schedule-bulk-upload'
+    ),
+
+    # Auto-fill deficits (must be registered before <int:pk>/)
+    path(
+        'vendor-delivery-schedules/auto-fill-deficits/',
+        AutoFillDeficitsView.as_view(),
+        name='vendor-schedule-auto-fill'
+    ),
+
+    # Change log / history drawer (must be registered before <int:pk>/)
+    path(
+        'vendor-delivery-schedules/change-logs/',
+        DeliveryChangeLogListView.as_view(),
+        name='vendor-delivery-change-logs'
+    ),
+
+    # CRUD endpoints
+    path(
+        'vendor-delivery-schedules/',
+        VendorScheduleListCreateView.as_view(),
+        name='vendor-delivery-schedules-list'
+    ),
+    path(
+        'vendor-delivery-schedules/<int:pk>/',
+        VendorScheduleDetailView.as_view(),
+        name='vendor-delivery-schedules-detail'
+    ),
+
+    # Template downloads and exports
+    path(
+        'exports/vendor-schedule-blank-template/',
+        VendorScheduleBlankTemplateView.as_view(),
+        name='vendor-schedule-blank-template'
+    ),
+    path(
+        'exports/vendor-schedule-prefilled/',
+        VendorSchedulePrefilledTemplateView.as_view(),
+        name='vendor-schedule-prefilled'
+    ),
+    path(
+        'exports/vendor-schedule-matrix/',
+        VendorScheduleMatrixExportView.as_view(),
+        name='vendor-schedule-matrix-export'
+    ),
 ]

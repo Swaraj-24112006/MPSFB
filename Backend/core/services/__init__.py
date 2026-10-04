@@ -13,6 +13,10 @@ from .audit_log_service import AuditLogService
 from .plan_freeze_service import PlanFreezeService
 from .cockpit_data_loader import CockpitDataLoaderService
 from .cockpit_engine import CockpitEngineService
+from .vendor_schedule_week_resolver import VendorScheduleWeekResolver
+from .consolidated_matrix_service import ConsolidatedMatrixService
+from .bulk_schedule_upload_service import BulkScheduleUploadService
+from .auto_fill_deficit_service import AutoFillDeficitService
 
 from .monthly_plan_distribution_service import MonthlyPlanDistributionService
 from .monthly_plan_upload_service import MonthlyPlanUploadService
@@ -35,4 +39,8 @@ __all__ = [
     'PlanFreezeService',
     'CockpitDataLoaderService',
     'CockpitEngineService',
+    'VendorScheduleWeekResolver',
+    'ConsolidatedMatrixService',
+    'BulkScheduleUploadService',
+    'AutoFillDeficitService',
 ]

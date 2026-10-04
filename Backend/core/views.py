@@ -2603,165 +2603,21 @@ class MondayActionDetailView(APIView):
         action.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Vendor Delivery Schedule Views (imported from core.vendor_schedule_views)
+# ─────────────────────────────────────────────────────────────────────────────
+from core.vendor_schedule_views import (
+    ConsolidatedMatrixView,
+    VendorScheduleListCreateView,
+    VendorScheduleDetailView,
+    VendorScheduleBulkUploadView,
+    AutoFillDeficitsView,
+    DeliveryChangeLogListView,
+    VendorScheduleBlankTemplateView,
+    VendorSchedulePrefilledTemplateView,
+    VendorScheduleMatrixExportView,
+)
 
-class VendorScheduleListCreateView(APIView):
-    """
-    D7: GET/POST /api/vendor-delivery-schedules/
-    List delivery schedules or create a new one with audit logging.
-    """
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        component_code = request.query_params.get('component_code')
-        week_code = request.query_params.get('week_code')
-        vendor_name = request.query_params.get('vendor_name')
-        delivery_status_filter = request.query_params.get('delivery_status')
-        po_number = request.query_params.get('po_number')
-
-        qs = VendorDeliverySchedule.objects.select_related('component', 'week').all()
-        if component_code:
-            qs = qs.filter(component_id=component_code)
-        if week_code:
-            qs = qs.filter(week_id=week_code)
-        if vendor_name:
-            qs = qs.filter(vendor_name__icontains=vendor_name)
-        if delivery_status_filter:
-            qs = qs.filter(delivery_status=delivery_status_filter)
-        if po_number:
-            qs = qs.filter(po_number__icontains=po_number)
-
-        serializer = VendorDeliveryScheduleSerializer(qs, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    def post(self, request):
-        changed_by = request.data.get('changed_by', 'system')
-        reason = request.data.get('reason_for_change', '')
-
-        if len(reason.strip()) < 10:
-            return Response(
-                {'error': 'reason_for_change is mandatory and must be at least 10 characters.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        serializer = VendorDeliveryScheduleSerializer(data=request.data)
-        if serializer.is_valid():
-            schedule = serializer.save()
-            # Create audit log
-            AuditLogService.log_creation(schedule, changed_by, reason)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-class VendorScheduleDetailView(APIView):
-    """
-    D8: PATCH/DELETE /api/vendor-delivery-schedules/<id>/
-    Edit or cancel a delivery schedule with mandatory audit logging.
-    """
-    permission_classes = [AllowAny]
-
-    def get_object(self, pk):
-        try:
-            return VendorDeliverySchedule.objects.select_related('component', 'week').get(pk=pk)
-        except VendorDeliverySchedule.DoesNotExist:
-            return None
-
-    def patch(self, request, pk):
-        schedule = self.get_object(pk)
-        if not schedule:
-            return Response({'error': 'Delivery schedule not found.'}, status=status.HTTP_404_NOT_FOUND)
-
-        changed_by = request.data.get('changed_by', 'system')
-        reason = request.data.get('reason_for_change', '')
-
-        if len(reason.strip()) < 10:
-            return Response(
-                {'error': 'reason_for_change is mandatory and must be at least 10 characters.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Capture old data before update
-        old_data = {
-            'expected_delivery_date': str(schedule.expected_delivery_date),
-            'promised_qty': float(schedule.promised_qty),
-            'delivery_status': schedule.delivery_status,
-            'vendor_name': schedule.vendor_name,
-            'buyer_name': schedule.buyer_name,
-        }
-
-        serializer = VendorDeliveryScheduleSerializer(schedule, data=request.data, partial=True)
-        if serializer.is_valid():
-            updated = serializer.save()
-            # Create audit log
-            AuditLogService.log_update(updated, old_data, changed_by, reason)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def delete(self, request, pk):
-        """Cancel a delivery schedule (set status=CANCELLED, qty=0)."""
-        schedule = self.get_object(pk)
-        if not schedule:
-            return Response({'error': 'Delivery schedule not found.'}, status=status.HTTP_404_NOT_FOUND)
-
-        changed_by = request.data.get('changed_by', 'system')
-        reason = request.data.get('reason_for_change', '')
-
-        if len(reason.strip()) < 10:
-            return Response(
-                {'error': 'reason_for_change is mandatory and must be at least 10 characters.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        old_qty = float(schedule.promised_qty)
-        old_status = schedule.delivery_status
-
-        schedule.delivery_status = 'CANCELLED'
-        schedule.promised_qty = 0
-        schedule.save()
-
-        AuditLogService.log_cancellation(schedule, changed_by, reason, old_qty, old_status)
-
-        serializer = VendorDeliveryScheduleSerializer(schedule)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-
-class DeliveryChangeLogListView(APIView):
-    """
-    D9: GET /api/vendor-delivery-schedules/change-logs/
-    Paginated audit trail for delivery schedule changes.
-    """
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        po_number = request.query_params.get('po_number')
-        component_code = request.query_params.get('component_code')
-        vendor_name = request.query_params.get('vendor_name')
-        schedule_id = request.query_params.get('schedule_id')
-        date_from = request.query_params.get('date_from')
-        date_to = request.query_params.get('date_to')
-
-        qs = DeliveryScheduleChangeLog.objects.all()
-        if po_number:
-            qs = qs.filter(po_number__icontains=po_number)
-        if component_code:
-            qs = qs.filter(component_code=component_code)
-        if vendor_name:
-            qs = qs.filter(vendor_name__icontains=vendor_name)
-        if schedule_id:
-            qs = qs.filter(schedule_id=schedule_id)
-        if date_from:
-            qs = qs.filter(changed_at__date__gte=date_from)
-        if date_to:
-            qs = qs.filter(changed_at__date__lte=date_to)
-
-        # Paginate
-        paginator = StandardResultsSetPagination()
-        page = paginator.paginate_queryset(qs, request)
-        if page is not None:
-            serializer = DeliveryScheduleChangeLogSerializer(page, many=True)
-            return paginator.get_paginated_response(serializer.data)
-
-        serializer = DeliveryScheduleChangeLogSerializer(qs[:100], many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class Echo:
