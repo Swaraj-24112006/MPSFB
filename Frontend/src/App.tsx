@@ -79,6 +79,21 @@ export default function App() {
 
   const [selectedMonth, setSelectedMonth] = useState<string>('2026-08');
 
+  // One-time clear of old dummy data from localStorage so all tabs start completely clean
+  if (typeof window !== 'undefined' && !localStorage.getItem('sap_cleared_dummy_data_v1')) {
+    localStorage.removeItem('sap_boms');
+    localStorage.removeItem('sap_vendor_buyers');
+    localStorage.removeItem('sap_weeks');
+    localStorage.removeItem('sap_monthly_plans');
+    localStorage.removeItem('sap_mb51');
+    localStorage.removeItem('sap_stock');
+    localStorage.removeItem('sap_vendor_delivery_schedules');
+    localStorage.removeItem('sap_monday_review_actions');
+    localStorage.removeItem('sap_plan_freeze');
+    localStorage.removeItem('sap_delivery_change_logs');
+    localStorage.setItem('sap_cleared_dummy_data_v1', 'true');
+  }
+
   // Core Data State (Persisted in localStorage)
   const [boms, setBoms] = useState<BOMItem[]>(() => {
     const saved = localStorage.getItem('sap_boms');
@@ -282,20 +297,21 @@ export default function App() {
   const handleResetData = () => {
     if (
       window.confirm(
-        'Reset all Master Data, Monthly Plans, Week Definitions, MB51 Transactions, Stock balances, Delivery Schedules and Action items to initial state?'
+        'Clear all Master Data, Monthly Plans, Week Definitions, MB51 Transactions, Stock balances, Delivery Schedules and Action items?'
       )
     ) {
-      setBoms(INITIAL_BOM_MASTER);
-      setVendorBuyers(INITIAL_VENDOR_BUYER_MASTER);
-      setWeeks(INITIAL_WEEK_DEFINITIONS);
-      setMonthlyPlans(INITIAL_MONTHLY_PLANS);
-      setMb51List(INITIAL_MB51_TRANSACTIONS);
-      setStockList(INITIAL_STOCK_REPORT);
-      setVendorDeliverySchedules(INITIAL_VENDOR_DELIVERY_SCHEDULES);
-      setMondayReviewActions(INITIAL_MONDAY_REVIEW_ACTIONS);
-      setPlanFreezeList(INITIAL_PLAN_FREEZE_ITEMS);
-      setDeliveryScheduleChangeLogs(INITIAL_DELIVERY_CHANGE_LOGS);
+      setBoms([]);
+      setVendorBuyers([]);
+      setWeeks([]);
+      setMonthlyPlans([]);
+      setMb51List([]);
+      setStockList([]);
+      setVendorDeliverySchedules([]);
+      setMondayReviewActions([]);
+      setPlanFreezeList([]);
+      setDeliveryScheduleChangeLogs([]);
       localStorage.clear();
+      localStorage.setItem('sap_cleared_dummy_data_v1', 'true');
       window.location.reload();
     }
   };
