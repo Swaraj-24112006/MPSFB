@@ -126,6 +126,49 @@ class MonthlyPlanDistributionService:
         }
 
     @staticmethod
+    def calculate_month_weights(weeks: list) -> Dict[str, float]:
+        """
+        Backend logic for the Month Weight percentage:
+        1. Get all weeks for the selected month.
+        2. Read Working Days for each week.
+        3. Calculate:
+              total_working_days = sum(all week working days)
+        4. For each week:
+              month_weight = (week_working_days / total_working_days) * 100
+        5. Store/display the calculated percentage.
+
+        example :
+        Week 1 = 1000 × 20% = 200
+        Week 2 = 1000 × 24% = 240
+        Week 3 = 1000 × 24% = 240
+        Week 4 = 1000 × 32% = 320
+
+        Returns dict mapping week_code to month_weight percentage float, e.g.:
+        {'w-2026-10-01': 20.0, 'w-2026-10-02': 24.0, ...}
+        """
+        if not weeks:
+            return {}
+
+        def get_week_code(w):
+            return getattr(w, 'week_code', None) or (w.get('week_code') or w.get('id') if isinstance(w, dict) else str(w))
+
+        def get_working_days(w):
+            if hasattr(w, 'working_days'):
+                return int(w.working_days)
+            if isinstance(w, dict):
+                return int(w.get('working_days', w.get('workingDays', w.get('days_count', w.get('daysCount', 0)))))
+            return 0
+
+        total_working_days = sum(get_working_days(w) for w in weeks)
+        if total_working_days <= 0:
+            return {get_week_code(w): 0.0 for w in weeks}
+
+        return {
+            get_week_code(w): round((get_working_days(w) / total_working_days) * 100, 2)
+            for w in weeks
+        }
+
+    @staticmethod
     def recalculate_monthly_plan(plan, weeks=None) -> Dict[str, int]:
         """
         Recalculates weekly_breakdown for a single MonthlyPlan instance and saves to DB.

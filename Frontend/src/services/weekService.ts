@@ -12,6 +12,7 @@ export interface WeekDTO {
   days_count: number;
   holiday_days: number;
   working_days: number;
+  month_weight?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -60,6 +61,7 @@ export function dtoToFrontend(dto: WeekDTO): WeekDefinition {
     daysCount: dto.days_count,
     holidayDays: dto.holiday_days,
     workingDays: dto.working_days,
+    monthWeight: dto.month_weight,
   };
 }
 

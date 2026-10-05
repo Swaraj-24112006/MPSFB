@@ -404,15 +404,24 @@ export const MonthlyPlanManager: React.FC<MonthlyPlanManagerProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-600">
-          <span className="text-slate-500">Active Week Weights ({totalMonthDays} Total Days):</span>
-          {monthWeeks.map((w) => (
-            <span
-              key={w.id}
-              className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-800 font-mono shadow-xs"
-            >
-              <strong className="text-emerald-700">{w.weekLabel}</strong>: {w.daysCount}d ({Math.round((w.daysCount / (totalMonthDays || 1)) * 100)}%)
-            </span>
-          ))}
+          <span className="text-slate-500">
+            Active Week Weights ({monthWeeks.reduce((sum, w) => sum + (w.workingDays ?? w.daysCount), 0)} Working Days):
+          </span>
+          {monthWeeks.map((w) => {
+            const totalWd = monthWeeks.reduce((sum, mw) => sum + (mw.workingDays ?? mw.daysCount), 0);
+            const wDays = w.workingDays ?? w.daysCount;
+            const pct = w.monthWeight !== undefined && w.monthWeight !== null
+              ? w.monthWeight
+              : totalWd > 0 ? Math.round((wDays / totalWd) * 1000) / 10 : 0;
+            return (
+              <span
+                key={w.id}
+                className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-800 font-mono shadow-xs"
+              >
+                <strong className="text-emerald-700">{w.weekLabel}</strong>: {wDays}d ({pct}%)
+              </span>
+            );
+          })}
         </div>
       </div>
 
@@ -430,7 +439,7 @@ export const MonthlyPlanManager: React.FC<MonthlyPlanManagerProps> = ({
 
         {monthWeeks.slice(0, 3).map((w) => (
           <div key={w.id} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-            <div className="text-xs text-slate-500 font-medium">{w.weekLabel} ({w.daysCount} Days)</div>
+            <div className="text-xs text-slate-500 font-medium">{w.weekLabel} ({w.workingDays ?? w.daysCount} Working Days)</div>
             <div className="text-2xl font-bold text-slate-900 mt-1 font-mono">
               {(weeklyConsolidatedTotals[w.id] || 0).toLocaleString()} <span className="text-xs text-slate-500 font-normal">Units</span>
             </div>
@@ -449,7 +458,7 @@ export const MonthlyPlanManager: React.FC<MonthlyPlanManagerProps> = ({
               Monthly FG Plan vs Prorated Weekly Consolidated Requirements
             </h2>
             <p className="text-xs text-slate-500">
-              Each row displays the monthly target and its automatic proportional distribution across weeks by days count
+              Each row displays the monthly target and its automatic proportional distribution across weeks by working days weight
             </p>
           </div>
 
@@ -473,14 +482,21 @@ export const MonthlyPlanManager: React.FC<MonthlyPlanManagerProps> = ({
                 <th className="py-3.5 px-4 text-right bg-emerald-50/50 text-emerald-950 font-bold">
                   Monthly Target
                 </th>
-                {monthWeeks.map((w) => (
-                  <th key={w.id} className="py-3.5 px-4 text-right font-bold text-slate-700">
-                    <div>{w.weekLabel}</div>
-                    <div className="text-[10px] text-slate-400 font-normal lowercase">
-                      {w.daysCount} days weight
-                    </div>
-                  </th>
-                ))}
+                {monthWeeks.map((w) => {
+                  const totalWd = monthWeeks.reduce((sum, mw) => sum + (mw.workingDays ?? mw.daysCount), 0);
+                  const wDays = w.workingDays ?? w.daysCount;
+                  const pct = w.monthWeight !== undefined && w.monthWeight !== null
+                    ? w.monthWeight
+                    : totalWd > 0 ? Math.round((wDays / totalWd) * 1000) / 10 : 0;
+                  return (
+                    <th key={w.id} className="py-3.5 px-4 text-right font-bold text-slate-700">
+                      <div>{w.weekLabel}</div>
+                      <div className="text-[10px] text-slate-400 font-normal lowercase">
+                        {wDays}d wd ({pct}%)
+                      </div>
+                    </th>
+                  );
+                })}
                 <th className="py-3.5 px-4 text-center">UOM</th>
                 <th className="py-3.5 px-4 text-right">Actions</th>
               </tr>

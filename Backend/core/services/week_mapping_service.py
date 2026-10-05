@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, Iterable, Any
 
 
@@ -11,7 +11,8 @@ class WeekMappingService:
     @classmethod
     def parse_date(cls, val: Any) -> Optional[date]:
         """
-        Parses date strings (YYYY-MM-DD or ISO 8601), datetime, or date objects into datetime.date.
+        Parses date strings (YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY, etc.), Excel serial numbers,
+        datetime, or date objects into datetime.date.
         """
         if not val:
             return None
@@ -19,15 +20,34 @@ class WeekMappingService:
             return val.date()
         if isinstance(val, date):
             return val
+        if isinstance(val, (int, float)):
+            try:
+                return (datetime(1899, 12, 30) + timedelta(days=float(val))).date()
+            except Exception:
+                return None
         if isinstance(val, str):
             clean_str = val.strip().replace('Z', '').split('T')[0]
-            try:
-                return datetime.strptime(clean_str[:10], '%Y-%m-%d').date()
-            except ValueError:
+            if not clean_str:
+                return None
+            formats = [
+                '%Y-%m-%d',
+                '%d-%m-%Y',
+                '%d/%m/%Y',
+                '%Y/%m/%d',
+                '%m/%d/%Y',
+                '%m-%d-%Y',
+                '%d.%m.%Y',
+                '%Y.%m.%d',
+            ]
+            for fmt in formats:
                 try:
-                    return datetime.fromisoformat(clean_str).date()
+                    return datetime.strptime(clean_str, fmt).date()
                 except ValueError:
-                    return None
+                    continue
+            try:
+                return datetime.fromisoformat(clean_str).date()
+            except ValueError:
+                return None
         return None
 
     @classmethod

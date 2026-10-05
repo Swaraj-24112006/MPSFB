@@ -396,6 +396,42 @@ class MB51Step17Tests(APITestCase):
         self.assertEqual(res_tsv['valid_rows'][0]['movement_type'], '601')
         self.assertEqual(res_tsv['valid_rows'][0]['quantity'], 800)
 
+    def test_mb51_parser_dd_mm_yyyy_dates_and_partner_header(self):
+        from core.services.mb51_parser import MB51Parser
+        from datetime import date
+        csv_data = (
+            "Material Document,Posting Date,Movement Type,Part Number,Material Description,Quantity,UOM,Storage Location,Partner / Vendor / Line,PO / Order No\n"
+            "5000210031,05-08-2026,101,7.06496.03.0,Vacuum Pump Panther 2.0L,1500,PC,FG01,Line A-PMP2,PRD-88201\n"
+            "5000210032,06-08-2026,101,100201,Die-Cast Aluminum Housing,3000,PC,SL01,Endurance Technologies,PO-4500091211\n"
+            "5000210033,07-08-2026,601,7.06496.03.0,Vacuum Pump Panther 2.0L,2600,PC,FG01,Tata Motors PV & EV,SO-9021102\n"
+            "5000210034,08-08-2026,101,100202,Precision Rotor Assembly,2200,PC,SL01,Bosch India,PO-4500091244\n"
+        )
+        res = MB51Parser.parse(csv_data, weeks=[self.w1, self.w2])
+        self.assertEqual(res['total_rows'], 4)
+        self.assertEqual(len(res['valid_rows']), 4)
+        self.assertEqual(len(res['error_rows']), 0)
+        self.assertEqual(res['valid_rows'][0]['material_document'], '5000210031')
+        self.assertEqual(res['valid_rows'][0]['posting_date'], date(2026, 8, 5))
+        self.assertEqual(res['valid_rows'][0]['vendor_customer'], 'Line A-PMP2')
+        self.assertEqual(res['valid_rows'][0]['po_order_number'], 'PRD-88201')
+        self.assertEqual(res['valid_rows'][0]['plant'], '1001')
+        self.assertEqual(res['valid_rows'][1]['vendor_customer'], 'Endurance Technologies')
+
+    def test_mb51_bulk_upload_endpoint_user_csv(self):
+        from rest_framework import status
+        csv_data = (
+            "Material Document,Posting Date,Movement Type,Part Number,Material Description,Quantity,UOM,Storage Location,Partner / Vendor / Line,PO / Order No\n"
+            "5000210031,05-08-2026,101,7.06496.03.0,Vacuum Pump Panther 2.0L,1500,PC,FG01,Line A-PMP2,PRD-88201\n"
+            "5000210032,06-08-2026,101,100201,Die-Cast Aluminum Housing,3000,PC,SL01,Endurance Technologies,PO-4500091211\n"
+            "5000210033,07-08-2026,601,7.06496.03.0,Vacuum Pump Panther 2.0L,2600,PC,FG01,Tata Motors PV & EV,SO-9021102\n"
+            "5000210034,08-08-2026,101,100202,Precision Rotor Assembly,2200,PC,SL01,Bosch India,PO-4500091244\n"
+        )
+        res = self.client.post('/api/uploads/mb51/', {'csv_text': csv_data, 'month': '2026-08'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['total_rows'], 4)
+        self.assertEqual(res.data['imported_rows'], 4)
+        self.assertEqual(res.data['error_rows'], 0)
+
     def test_single_create_validations(self):
         # 1. Invalid movement type (e.g. 541) should be rejected on single create
         invalid_mvt = {

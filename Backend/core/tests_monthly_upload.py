@@ -690,3 +690,144 @@ class MonthlyUploadTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.json()['status'], 'COMPLETED')
         self.assertEqual(res.json()['imported_rows'], 10)
+
+
+class MonthWeightLogicTests(TestCase):
+    """
+    Tests for the backend logic for Month Weight percentage:
+    1. Get all weeks for the selected month.
+    2. Read Working Days for each week.
+    3. Calculate:
+          total_working_days = sum(all week working days)
+    4. For each week:
+          month_weight = (week_working_days / total_working_days) × 100
+    5. Store/display the calculated percentage.
+
+    User Example:
+    Week 1 (5 working days) = 1000 × 20% = 200
+    Week 2 (6 working days) = 1000 × 24% = 240
+    Week 3 (6 working days) = 1000 × 24% = 240
+    Week 4 (8 working days) = 1000 × 32% = 320
+    Total working days = 25
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='mwtester', password='password123')
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.month = '2026-10'
+
+    def test_month_weight_percentage_calculation_user_example(self):
+        """
+        Verify exact user example:
+        Week 1 (5 days) -> 20%
+        Week 2 (6 days) -> 24%
+        Week 3 (6 days) -> 24%
+        Week 4 (8 days) -> 32%
+        Total: 25 days, target: 1000 -> 200, 240, 240, 320
+        """
+        weeks = [
+            {'week_code': 'w-2026-10-01', 'week_no': 1, 'working_days': 5},
+            {'week_code': 'w-2026-10-02', 'week_no': 2, 'working_days': 6},
+            {'week_code': 'w-2026-10-03', 'week_no': 3, 'working_days': 6},
+            {'week_code': 'w-2026-10-04', 'week_no': 4, 'working_days': 8},
+        ]
+
+        # 1. Test calculation via MonthlyPlanDistributionService
+        month_weights = MonthlyPlanDistributionService.calculate_month_weights(weeks)
+        self.assertEqual(month_weights['w-2026-10-01'], 20.0)
+        self.assertEqual(month_weights['w-2026-10-02'], 24.0)
+        self.assertEqual(month_weights['w-2026-10-03'], 24.0)
+        self.assertEqual(month_weights['w-2026-10-04'], 32.0)
+        self.assertEqual(sum(month_weights.values()), 100.0)
+
+        # 2. Test calculation via WeekService alias
+        service_weights = WeekService.calculate_month_weights(weeks)
+        self.assertEqual(service_weights, month_weights)
+
+        # 3. Test distribution with monthly target 1,000 units
+        breakdown = MonthlyPlanDistributionService.distribute_monthly_target(1000, weeks)
+        self.assertEqual(breakdown['w-2026-10-01'], 200)
+        self.assertEqual(breakdown['w-2026-10-02'], 240)
+        self.assertEqual(breakdown['w-2026-10-03'], 240)
+        self.assertEqual(breakdown['w-2026-10-04'], 320)
+        self.assertEqual(sum(breakdown.values()), 1000)
+
+    def test_calculate_and_store_month_weights_in_database(self):
+        """
+        Verify storing calculated percentage in WeekDefinition model:
+        (week_working_days / total_working_days) * 100
+        """
+        w1 = WeekDefinition.objects.create(
+            month=self.month, week_no=1, week_code='w-2026-10-01', week_label='Week 1',
+            start_date='2026-10-01', end_date='2026-10-07', days_count=7, holiday_days=2, working_days=5
+        )
+        w2 = WeekDefinition.objects.create(
+            month=self.month, week_no=2, week_code='w-2026-10-02', week_label='Week 2',
+            start_date='2026-10-08', end_date='2026-10-14', days_count=7, holiday_days=1, working_days=6
+        )
+        w3 = WeekDefinition.objects.create(
+            month=self.month, week_no=3, week_code='w-2026-10-03', week_label='Week 3',
+            start_date='2026-10-15', end_date='2026-10-21', days_count=7, holiday_days=1, working_days=6
+        )
+        w4 = WeekDefinition.objects.create(
+            month=self.month, week_no=4, week_code='w-2026-10-04', week_label='Week 4',
+            start_date='2026-10-22', end_date='2026-10-31', days_count=10, holiday_days=2, working_days=8
+        )
+
+        WeekService.calculate_and_store_month_weights(self.month)
+
+        w1.refresh_from_db()
+        w2.refresh_from_db()
+        w3.refresh_from_db()
+        w4.refresh_from_db()
+
+        self.assertEqual(float(w1.month_weight), 20.00)
+        self.assertEqual(float(w2.month_weight), 24.00)
+        self.assertEqual(float(w3.month_weight), 24.00)
+        self.assertEqual(float(w4.month_weight), 32.00)
+
+    def test_api_weeks_endpoint_returns_month_weight(self):
+        """Verify GET /api/weeks/ exposes month_weight as float"""
+        WeekDefinition.objects.create(
+            month=self.month, week_no=1, week_code='w-2026-10-01', week_label='Week 1',
+            start_date='2026-10-01', end_date='2026-10-07', days_count=7, holiday_days=2, working_days=5,
+            month_weight=20.00
+        )
+        WeekDefinition.objects.create(
+            month=self.month, week_no=2, week_code='w-2026-10-02', week_label='Week 2',
+            start_date='2026-10-08', end_date='2026-10-14', days_count=7, holiday_days=1, working_days=6,
+            month_weight=24.00
+        )
+        res = self.client.get(f'/api/weeks/?month={self.month}')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        results = res.json()['results']
+        self.assertEqual(results[0]['month_weight'], 20.0)
+        self.assertEqual(results[1]['month_weight'], 24.0)
+
+    def test_auto_generate_weeks_calculates_and_stores_month_weight(self):
+        """Verify POST /api/weeks/auto-generate/ sets valid month_weight summing to 100%"""
+        res = self.client.post('/api/weeks/auto-generate/', {'month': self.month, 'overwrite': True}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        weeks = res.json()['results']
+        self.assertEqual(len(weeks), 4)
+
+        total_weight = sum(w['month_weight'] for w in weeks)
+        self.assertAlmostEqual(total_weight, 100.0, places=1)
+        for w in weeks:
+            self.assertGreater(w['month_weight'], 0.0)
+
+    def test_update_week_recalculates_month_weights(self):
+        """Updating holidays on a week triggers recalculation of month weights for all weeks"""
+        res = self.client.post('/api/weeks/auto-generate/', {'month': self.month, 'overwrite': True}, format='json')
+        w1_code = res.json()['results'][0]['week_code']
+
+        # Increase holidays for W1 -> reduces working days -> recalculates all weights
+        patch_res = self.client.patch(f'/api/weeks/{w1_code}/', {'holiday_days': 4}, format='json')
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+
+        # Fetch updated weeks
+        list_res = self.client.get(f'/api/weeks/?month={self.month}')
+        updated_weeks = list_res.json()['results']
+        total_weight = sum(w['month_weight'] for w in updated_weeks)
+        self.assertAlmostEqual(total_weight, 100.0, places=1)

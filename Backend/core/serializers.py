@@ -322,6 +322,7 @@ class WeekDefinitionSerializer(serializers.ModelSerializer):
     - Exposes week_code as read-only.
     """
     week_label = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    month_weight = serializers.FloatField(read_only=True)
 
     class Meta:
         model = WeekDefinition
@@ -336,6 +337,7 @@ class WeekDefinitionSerializer(serializers.ModelSerializer):
             'days_count',
             'holiday_days',
             'working_days',
+            'month_weight',
             'created_at',
             'updated_at',
         ]
@@ -344,6 +346,7 @@ class WeekDefinitionSerializer(serializers.ModelSerializer):
             'week_code',
             'days_count',
             'working_days',
+            'month_weight',
             'created_at',
             'updated_at',
         ]

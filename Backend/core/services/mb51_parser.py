@@ -192,7 +192,13 @@ class MB51Parser:
             elif ('doc' not in norm_clean) and (any(k in norm_clean for k in ['movement type', 'mvt type', 'movement', 'bwart']) or norm_clean in ('mvt', 'bwart')):
                 if 'movement_type' not in header_map:
                     header_map['movement_type'] = idx
-            elif ('doc' not in norm_clean and 'desc' not in norm_clean) and any(k in norm_clean for k in ['part number', 'part no', 'material no', 'matnr', 'part', 'material']):
+            elif any(k in norm_clean for k in ['vendor', 'customer', 'partner', 'supplier', 'lifnr', 'kunnr']):
+                if 'vendor_customer' not in header_map:
+                    header_map['vendor_customer'] = idx
+            elif ('doc' not in norm_clean and 'desc' not in norm_clean and 'partner' not in norm_clean) and (
+                any(k in norm_clean for k in ['part number', 'part no', 'material no', 'matnr', 'material']) or
+                re.search(r'\bpart\b', norm_clean)
+            ):
                 if 'part_number' not in header_map:
                     header_map['part_number'] = idx
             elif any(k in norm_clean for k in ['description', 'material desc', 'maktx', 'name', 'desc']):
@@ -207,13 +213,10 @@ class MB51Parser:
             elif any(k in norm_clean for k in ['sloc', 'storage loc', 'lgort', 'storage']):
                 if 'storage_location' not in header_map:
                     header_map['storage_location'] = idx
-            elif any(k in norm_clean for k in ['vendor', 'customer', 'partner', 'supplier', 'lifnr', 'kunnr']):
-                if 'vendor_customer' not in header_map:
-                    header_map['vendor_customer'] = idx
             elif any(k in norm_clean for k in ['plant', 'werks']):
                 if 'plant' not in header_map:
                     header_map['plant'] = idx
-            elif any(k in norm_clean for k in ['po', 'purchase order', 'order', 'ebeln', 'aufnr']):
+            elif any(k in norm_clean for k in ['purchase order', 'order', 'ebeln', 'aufnr']) or re.search(r'\bpo\b', norm_clean):
                 if 'po_order_number' not in header_map:
                     header_map['po_order_number'] = idx
 
@@ -230,10 +233,12 @@ class MB51Parser:
         Parses a single row using either the header map or positional fallback.
         """
         def get_val(key: str, default_pos: int, fallback: str = '') -> str:
-            if header_map and key in header_map:
-                idx = header_map[key]
-                if idx < len(row):
-                    return row[idx].strip()
+            if header_map is not None:
+                if key in header_map:
+                    idx = header_map[key]
+                    if idx < len(row):
+                        return row[idx].strip()
+                return fallback
             if default_pos < len(row):
                 return row[default_pos].strip()
             return fallback
@@ -276,7 +281,7 @@ class MB51Parser:
         # Validate date
         parsed_date = WeekMappingService.parse_date(date_str)
         if not parsed_date:
-            return extracted, f"Row {row_index}: Invalid posting date '{date_str}'. Expected YYYY-MM-DD format."
+            return extracted, f"Row {row_index}: Invalid posting date '{date_str}'. Expected date in YYYY-MM-DD, DD-MM-YYYY, or DD/MM/YYYY format."
         extracted["posting_date"] = parsed_date
 
         # Validate quantity

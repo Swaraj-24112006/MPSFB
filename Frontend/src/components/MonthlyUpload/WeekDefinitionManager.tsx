@@ -257,17 +257,29 @@ export const WeekDefinitionManager: React.FC<WeekDefinitionManagerProps> = ({
       'Start Date',
       'End Date',
       'Days Count',
-      'Working Days'
+      'Working Days',
+      'Month Weight %'
     ];
-    const rows = weeks.map((w) => [
-      `"${w.month}"`,
-      w.weekNo,
-      `"${w.weekLabel}"`,
-      `"${w.startDate}"`,
-      `"${w.endDate}"`,
-      w.daysCount,
-      w.workingDays || w.daysCount
-    ]);
+    const rows = weeks.map((w) => {
+      const monthWeeks = weeks.filter((mw) => mw.month === w.month);
+      const totalMonthWorkingDays = monthWeeks.reduce((sum, mw) => sum + (mw.workingDays ?? mw.daysCount), 0);
+      const mWeight = w.monthWeight !== undefined && w.monthWeight !== null
+        ? w.monthWeight
+        : totalMonthWorkingDays > 0
+        ? Math.round(((w.workingDays ?? w.daysCount) / totalMonthWorkingDays) * 1000) / 10
+        : 0;
+
+      return [
+        `"${w.month}"`,
+        w.weekNo,
+        `"${w.weekLabel}"`,
+        `"${w.startDate}"`,
+        `"${w.endDate}"`,
+        w.daysCount,
+        w.workingDays || w.daysCount,
+        mWeight
+      ];
+    });
 
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -450,9 +462,15 @@ export const WeekDefinitionManager: React.FC<WeekDefinitionManagerProps> = ({
                 </tr>
               ) : (
                 currentMonthWeeks.map((week) => {
+                  const totalWorkingDaysInMonth = currentMonthWeeks.reduce(
+                    (sum, w) => sum + (w.workingDays ?? w.daysCount),
+                    0
+                  );
                   const weightPct =
-                    totalDaysInMonthWeeks > 0
-                      ? Math.round((week.daysCount / totalDaysInMonthWeeks) * 1000) / 10
+                    week.monthWeight !== undefined && week.monthWeight !== null
+                      ? week.monthWeight
+                      : totalWorkingDaysInMonth > 0
+                      ? Math.round(((week.workingDays ?? week.daysCount) / totalWorkingDaysInMonth) * 1000) / 10
                       : 0;
 
                   return (

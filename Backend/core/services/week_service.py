@@ -157,6 +157,12 @@ class WeekService:
         w4_days = WeekService.compute_days_count(w4_start, w4_end)
         w4_working = WeekService.compute_working_days(w4_days, 2)
 
+        total_working_days = w1_working + w2_working + w3_working + w4_working
+        w1_weight = round((w1_working / total_working_days) * 100, 2) if total_working_days > 0 else 0.00
+        w2_weight = round((w2_working / total_working_days) * 100, 2) if total_working_days > 0 else 0.00
+        w3_weight = round((w3_working / total_working_days) * 100, 2) if total_working_days > 0 else 0.00
+        w4_weight = round((w4_working / total_working_days) * 100, 2) if total_working_days > 0 else 0.00
+
         return [
             {
                 "month": month,
@@ -168,6 +174,7 @@ class WeekService:
                 "days_count": w1_days,
                 "holiday_days": 1,
                 "working_days": w1_working,
+                "month_weight": w1_weight,
             },
             {
                 "month": month,
@@ -179,6 +186,7 @@ class WeekService:
                 "days_count": w2_days,
                 "holiday_days": 1,
                 "working_days": w2_working,
+                "month_weight": w2_weight,
             },
             {
                 "month": month,
@@ -190,6 +198,7 @@ class WeekService:
                 "days_count": w3_days,
                 "holiday_days": 1,
                 "working_days": w3_working,
+                "month_weight": w3_weight,
             },
             {
                 "month": month,
@@ -201,8 +210,59 @@ class WeekService:
                 "days_count": w4_days,
                 "holiday_days": 2,
                 "working_days": w4_working,
+                "month_weight": w4_weight,
             },
         ]
+
+    @staticmethod
+    def calculate_month_weights(weeks: list) -> Dict[str, float]:
+        """
+        Backend logic for Month Weight percentage:
+        1. Get all weeks for the selected month.
+        2. Read Working Days for each week.
+        3. Calculate:
+              total_working_days = sum(all week working days)
+        4. For each week:
+              month_weight = (week_working_days / total_working_days) * 100
+        5. Store/display the calculated percentage.
+
+        example :
+        Week 1 = 1000 × 20% = 200
+        Week 2 = 1000 × 24% = 240
+        Week 3 = 1000 × 24% = 240
+        Week 4 = 1000 × 32% = 320
+        """
+        from core.services.monthly_plan_distribution_service import MonthlyPlanDistributionService
+        return MonthlyPlanDistributionService.calculate_month_weights(weeks)
+
+    @staticmethod
+    def calculate_and_store_month_weights(month: str) -> List[Any]:
+        """
+        Calculates and stores month_weight for all weeks of the specified month in DB:
+        1. Get all weeks for the selected month.
+        2. Read Working Days for each week.
+        3. Calculate:
+              total_working_days = sum(all week working days)
+        4. For each week:
+              month_weight = (week_working_days / total_working_days) * 100
+        5. Store the calculated percentage on each week record.
+        """
+        clean_month = month.strip()
+        from core.models import WeekDefinition
+
+        weeks = list(WeekDefinition.objects.filter(month=clean_month).order_by('week_no'))
+        if not weeks:
+            return []
+
+        total_working_days = sum(w.working_days for w in weeks)
+        for w in weeks:
+            if total_working_days > 0:
+                w.month_weight = round((w.working_days / total_working_days) * 100, 2)
+            else:
+                w.month_weight = 0.00
+            w.save(update_fields=['month_weight', 'updated_at'])
+
+        return weeks
 
     @staticmethod
     def get_standard_week_data_for_month(month: str) -> List[Dict[str, Any]]:

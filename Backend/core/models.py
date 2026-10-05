@@ -275,6 +275,12 @@ class WeekDefinition(models.Model):
     days_count = models.IntegerField(help_text="Total calendar days in this week bucket")
     holiday_days = models.IntegerField(default=0, help_text="Number of holidays / plant off-days")
     working_days = models.IntegerField(help_text="Effective working days available for production")
+    month_weight = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0.00,
+        help_text="Calculated month weight percentage: (week_working_days / total_working_days) * 100"
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

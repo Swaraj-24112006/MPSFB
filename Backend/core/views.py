@@ -754,7 +754,7 @@ class BOMCSVUploadView(APIView):
             raw_headers = rows[0]
             header_map = {}
             for idx, h in enumerate(raw_headers):
-                clean = h.strip().lower().replace(' ', '_').replace('-', '_').replace('*', '')
+                clean = h.strip().lower().replace(' ', '_').replace('-', '_').replace('*', '').replace('(', '').replace(')', '')
                 if clean in ('fg_code', 'fgcode', 'finished_good_code', 'finished_good', 'fg'):
                     header_map['fg_code'] = idx
                 elif clean in ('fg_description', 'fgdescription', 'finished_good_description', 'fg_desc'):
@@ -984,7 +984,7 @@ class VendorBuyerCSVUploadView(APIView):
             raw_headers = rows[0]
             header_map = {}
             for idx, h in enumerate(raw_headers):
-                clean = h.strip().lower().replace(' ', '_').replace('-', '_').replace('*', '')
+                clean = h.strip().lower().replace(' ', '_').replace('-', '_').replace('*', '').replace('(', '').replace(')', '')
                 if clean in ('vendor_code', 'vendorcode', 'vendor_id', 'supplier_code'):
                     header_map['vendor_code'] = idx
                 elif clean in ('vendor_name', 'vendorname', 'supplier_name', 'supplier'):
@@ -1160,6 +1160,18 @@ class WeekListCreateView(generics.ListCreateAPIView):
             return None
         return super().paginate_queryset(queryset)
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            instance = serializer.save()
+            WeekService.calculate_and_store_month_weights(instance.month)
+            instance.refresh_from_db()
+            ProrateService.cascade_reprorate(instance.month)
+        output_serializer = self.get_serializer(instance)
+        headers = self.get_success_headers(output_serializer.data)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
 
 class WeekDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
@@ -1194,8 +1206,11 @@ class WeekDetailView(generics.RetrieveUpdateDestroyAPIView):
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
             self.perform_update(serializer)
+            WeekService.calculate_and_store_month_weights(instance.month)
+            instance.refresh_from_db()
             cascade_count = ProrateService.cascade_reprorate(instance.month)
-        data = serializer.data
+        output_serializer = self.get_serializer(instance)
+        data = output_serializer.data
         data['cascade_plans_updated'] = cascade_count
         return Response(data, status=status.HTTP_200_OK)
 
@@ -1218,6 +1233,7 @@ class WeekDetailView(generics.RetrieveUpdateDestroyAPIView):
         with transaction.atomic():
             month = instance.month
             instance.delete()
+            WeekService.calculate_and_store_month_weights(month)
             cascade_count = ProrateService.cascade_reprorate(month)
         return Response({
             "deleted": True,
@@ -1290,11 +1306,14 @@ class WeekAutoGenerateView(APIView):
                                 'days_count': w_data['days_count'],
                                 'holiday_days': w_data['holiday_days'],
                                 'working_days': w_data['working_days'],
+                                'month_weight': w_data.get('month_weight', 0.00),
                             }
                         )
                         created_objs.append(week_obj)
 
+                    WeekService.calculate_and_store_month_weights(clean_month)
                     ProrateService.cascade_reprorate(clean_month)
+                    created_objs = list(WeekDefinition.objects.filter(month=clean_month).order_by('week_no'))
 
                 serializer = WeekDefinitionSerializer(created_objs, many=True)
                 return Response({
@@ -1340,13 +1359,16 @@ class WeekAutoGenerateView(APIView):
                                 'days_count': w_data['days_count'],
                                 'holiday_days': w_data['holiday_days'],
                                 'working_days': w_data['working_days'],
+                                'month_weight': w_data.get('month_weight', 0.00),
                             }
                         )
                         created_objs.append(week_obj)
 
                     for m in range(1, 13):
                         month_str = f"{year_int:04d}-{m:02d}"
+                        WeekService.calculate_and_store_month_weights(month_str)
                         ProrateService.cascade_reprorate(month_str)
+                    created_objs = list(WeekDefinition.objects.filter(month__startswith=f"{year_int:04d}-").order_by('month', 'week_no'))
 
                 serializer = WeekDefinitionSerializer(created_objs, many=True)
                 return Response({
@@ -1379,7 +1401,7 @@ class WeekCSVExportView(APIView):
 
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['Month', 'Week No', 'Week Code', 'Week Label', 'Start Date', 'End Date', 'Days Count', 'Holiday Days', 'Working Days'])
+        writer.writerow(['Month', 'Week No', 'Week Code', 'Week Label', 'Start Date', 'End Date', 'Days Count', 'Holiday Days', 'Working Days', 'Month Weight %'])
         for w in qs:
             writer.writerow([
                 w.month,
@@ -1390,7 +1412,8 @@ class WeekCSVExportView(APIView):
                 w.end_date,
                 w.days_count,
                 w.holiday_days,
-                w.working_days
+                w.working_days,
+                float(w.month_weight)
             ])
 
         output.seek(0)
