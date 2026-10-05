@@ -29,8 +29,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Exports & Local CSVs
-*.csv
+
 
 # OS & Editor
 .DS_Store
