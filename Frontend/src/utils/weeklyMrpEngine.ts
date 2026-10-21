@@ -5,6 +5,7 @@ import {
   MonthlyPlanItem,
   MB51TransactionItem,
   StockReportItem,
+  VendorDeliverySchedule,
   FGWeeklyCoverageSummary,
   RMWeeklyRequirementSummary
 } from '../types';
@@ -39,13 +40,18 @@ export function computeFGWeeklyCoverage(
   monthlyPlans: MonthlyPlanItem[],
   weeks: WeekDefinition[],
   mb51List: MB51TransactionItem[],
-  stockList: StockReportItem[]
+  stockList: StockReportItem[],
+  openingStockDate?: string
 ): FGWeeklyCoverageSummary[] {
   const monthWeeks = weeks
     .filter((w) => w.month === selectedMonth)
     .sort((a, b) => a.weekNo - b.weekNo);
 
   const monthPlans = monthlyPlans.filter((p) => p.month === selectedMonth);
+
+  // Derive effective opening date if not explicitly passed
+  const effectiveOpeningDate =
+    openingStockDate || stockList.find((s) => s.stockDate)?.stockDate;
 
   return monthPlans.map((plan) => {
     // Find starting FG stock
@@ -61,7 +67,7 @@ export function computeFGWeeklyCoverage(
       const planTarget = plan.weeklyBreakdown[week.id] || 0;
       totalPlanTarget += planTarget;
 
-      // Filter MB51 transactions for this FG and this week
+      // Filter MB51 transactions for this FG and this week (strictly check weekId first to avoid double counting)
       const fgReceipts = mb51List.filter((tx) => {
         const isMvt101 = tx.movementType === '101';
         const isThisFG = tx.partNumber === plan.fgCode;
@@ -85,7 +91,23 @@ export function computeFGWeeklyCoverage(
       totalActualDisp += actualDisp;
 
       const variance = actualProd - planTarget;
-      rollingStock = rollingStock + actualProd - actualDisp;
+
+      // Opening stock date aware rolling stock:
+      // If the week ended before the opening stock date, it's historical before the inventory snapshot.
+      if (effectiveOpeningDate && week.endDate < effectiveOpeningDate) {
+        // Historical week prior to opening stock snapshot — don't adjust rolling stock
+      } else {
+        // Transactions that occurred on or after openingStockDate affect rolling stock
+        const receiptsFromDate = fgReceipts
+          .filter((tx) => !effectiveOpeningDate || tx.postingDate >= effectiveOpeningDate)
+          .reduce((sum, tx) => sum + tx.quantity, 0);
+
+        const dispatchesFromDate = fgDispatches
+          .filter((tx) => !effectiveOpeningDate || tx.postingDate >= effectiveOpeningDate)
+          .reduce((sum, tx) => sum + tx.quantity, 0);
+
+        rollingStock = rollingStock + receiptsFromDate - dispatchesFromDate;
+      }
 
       return {
         weekId: week.id,
@@ -96,7 +118,7 @@ export function computeFGWeeklyCoverage(
         actualProductionReceipt: actualProd,
         variance,
         actualDispatch: actualDisp,
-        closingStock: rollingStock
+        closingStock: Math.round(rollingStock)
       };
     });
 
@@ -118,7 +140,8 @@ export function computeFGWeeklyCoverage(
 }
 
 /**
- * Computes Consolidated RM/PM Requirements, MB51 Inwards (101 prefix non-7), Stock Balances & Buyer Assignments
+ * Computes Consolidated RM/PM Requirements, MB51 Inwards (101 prefix non-7),
+ * Promised Vendor Delivery Schedules, Stock Balances & Buyer Assignments
  */
 export function computeRMWeeklyRequirements(
   selectedMonth: string,
@@ -127,13 +150,19 @@ export function computeRMWeeklyRequirements(
   boms: BOMItem[],
   vendorBuyers: VendorBuyerItem[],
   mb51List: MB51TransactionItem[],
-  stockList: StockReportItem[]
+  stockList: StockReportItem[],
+  vendorDeliverySchedules: VendorDeliverySchedule[] = [],
+  openingStockDate?: string
 ): RMWeeklyRequirementSummary[] {
   const monthWeeks = weeks
     .filter((w) => w.month === selectedMonth)
     .sort((a, b) => a.weekNo - b.weekNo);
 
   const monthPlans = monthlyPlans.filter((p) => p.month === selectedMonth);
+
+  // Derive effective opening date if not explicitly passed
+  const effectiveOpeningDate =
+    openingStockDate || stockList.find((s) => s.stockDate)?.stockDate;
 
   // 1. Group BOM items by componentCode
   const componentMap = new Map<
@@ -179,7 +208,7 @@ export function computeRMWeeklyRequirements(
   componentMap.forEach((comp) => {
     // Lookup vendor and buyer from master
     const vbMapping = vendorBuyers.find((vb) =>
-      vb.suppliedComponents.includes(comp.componentCode)
+      vb.suppliedComponents && vb.suppliedComponents.includes(comp.componentCode)
     );
 
     const buyerName = vbMapping
@@ -189,16 +218,22 @@ export function computeRMWeeklyRequirements(
     const vendorCode = vbMapping ? vbMapping.vendorCode : 'V-NONE';
     const leadTimeDays = vbMapping ? vbMapping.leadTimeDays : 7;
 
-    // Lookup Stock Report
+    // Lookup Stock Report (default safety stock to 0 rather than arbitrary 500)
     const stockItem = stockList.find((s) => s.partNumber === comp.componentCode);
     const currentStock = stockItem ? stockItem.unrestrictedStock : 0;
-    const safetyStock = stockItem ? stockItem.safetyStock : 500;
+    const safetyStock = stockItem ? stockItem.safetyStock : 0;
 
     let rollingStock = currentStock;
     let totalGrossReq = 0;
     let totalInward = 0;
+    let totalScheduled = 0;
     let overallStatus: 'OK' | 'WARNING' | 'SHORTAGE' = 'OK';
     let maxShortage = 0;
+
+    // Pre-filter delivery schedules for this component
+    const compSchedules = vendorDeliverySchedules.filter(
+      (s) => s.componentCode === comp.componentCode && s.deliveryStatus !== 'CANCELLED'
+    );
 
     const weekSummaries = monthWeeks.map((week) => {
       // Calculate Gross Requirement across all active FG plans in this month
@@ -214,7 +249,7 @@ export function computeRMWeeklyRequirements(
       grossReqForWeek = Math.round(grossReqForWeek * 100) / 100;
       totalGrossReq += grossReqForWeek;
 
-      // Filter MB51 Receipts (Mvt 101 prefix non-7) for this component
+      // Filter MB51 Receipts (Mvt 101 prefix non-7) for this component (check weekId strictly)
       const rmReceipts = mb51List.filter((tx) => {
         const isMvt101 = tx.movementType === '101';
         const isThisComp = tx.partNumber === comp.componentCode;
@@ -223,11 +258,32 @@ export function computeRMWeeklyRequirements(
         return isMvt101 && isThisComp && matchesWeek;
       });
 
-      const inwardQty = rmReceipts.reduce((sum, tx) => sum + tx.quantity, 0);
-      totalInward += inwardQty;
+      const actualInward = rmReceipts.reduce((sum, tx) => sum + tx.quantity, 0);
+      totalInward += actualInward;
 
-      // Projected Stock = Rolling Stock + Inward - Gross Requirement
-      rollingStock = rollingStock + inwardQty - grossReqForWeek;
+      // Calculate promised commitments from VendorDeliverySchedule for this week
+      const weekSchedules = compSchedules.filter((s) =>
+        s.weekId ? s.weekId === week.id : (s.expectedDeliveryDate ? isDateInWeek(s.expectedDeliveryDate, week) : false)
+      );
+      const scheduledInward = weekSchedules.reduce((sum, s) => sum + (Number(s.promisedQty) || 0), 0);
+      totalScheduled += scheduledInward;
+
+      // Total inward supply for the week (actual goods receipts plus active delivery schedule commitments)
+      const totalWeekInward = actualInward + scheduledInward;
+
+      // Opening stock date aware rolling stock:
+      // If week is strictly before openingStockDate, past consumption/receipts already occurred prior to snapshot.
+      if (effectiveOpeningDate && week.endDate < effectiveOpeningDate) {
+        // Historical week prior to opening stock snapshot — don't adjust rolling stock
+      } else {
+        // Only inward receipts on or after openingStockDate count as new receipts
+        const inwardsFromDate = rmReceipts
+          .filter((tx) => !effectiveOpeningDate || tx.postingDate >= effectiveOpeningDate)
+          .reduce((sum, tx) => sum + tx.quantity, 0);
+
+        // Projected Stock = Rolling Stock + (actual inward from date + scheduled) - Gross Requirement
+        rollingStock = rollingStock + inwardsFromDate + scheduledInward - grossReqForWeek;
+      }
 
       let status: 'OK' | 'WARNING' | 'SHORTAGE' = 'OK';
       let deficit = 0;
@@ -250,7 +306,9 @@ export function computeRMWeeklyRequirements(
         weekNo: week.weekNo,
         weekLabel: week.weekLabel,
         grossRequirement: grossReqForWeek,
-        actualInwardReceipt: inwardQty,
+        actualInwardReceipt: actualInward,
+        scheduledDeliveryQty: scheduledInward,
+        totalInwardSupply: totalWeekInward,
         projectedStock: Math.round(rollingStock),
         deficit: Math.round(deficit),
         status
@@ -272,6 +330,7 @@ export function computeRMWeeklyRequirements(
       weeks: weekSummaries,
       totalGrossRequirement: Math.round(totalGrossReq),
       totalInwardReceived: Math.round(totalInward),
+      totalScheduledDelivery: Math.round(totalScheduled),
       overallStatus,
       maxShortageQty: Math.round(maxShortage)
     });

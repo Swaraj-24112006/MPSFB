@@ -29,6 +29,7 @@ interface WeeklyFGSupplyViewProps {
   stockList: StockReportItem[];
   selectedMonth: string;
   onSelectMonth: (month: string) => void;
+  openingStockDate?: string;
 }
 
 export const WeeklyFGSupplyView: React.FC<WeeklyFGSupplyViewProps> = ({
@@ -37,7 +38,8 @@ export const WeeklyFGSupplyView: React.FC<WeeklyFGSupplyViewProps> = ({
   mb51List,
   stockList,
   selectedMonth,
-  onSelectMonth
+  onSelectMonth,
+  openingStockDate
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedFG, setSelectedFG] = useState<string>('ALL');
@@ -51,7 +53,14 @@ export const WeeklyFGSupplyView: React.FC<WeeklyFGSupplyViewProps> = ({
     monthlyPlans,
     weeks,
     mb51List,
-    stockList
+    stockList,
+    openingStockDate
+  );
+
+  const uniqueFGs = Array.from(
+    new Map(
+      coverageSummaries.map((s) => [s.fgCode, { fgCode: s.fgCode, fgDescription: s.fgDescription }])
+    ).values()
   );
 
   const filteredSummaries = coverageSummaries.filter((s) => {
@@ -234,15 +243,42 @@ export const WeeklyFGSupplyView: React.FC<WeeklyFGSupplyViewProps> = ({
 
       {/* Search and Filters */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
-        <div className="relative min-w-[280px]">
-          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Search FG code, name, customer OEM..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-          />
+        <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+          <div className="relative min-w-[260px]">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search FG code, name, customer OEM..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <select
+            value={selectedFG}
+            onChange={(e) => setSelectedFG(e.target.value)}
+            className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white text-slate-700 font-medium focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="ALL">All Finished Goods ({uniqueFGs.length})</option>
+            {uniqueFGs.map((fg) => (
+              <option key={fg.fgCode} value={fg.fgCode}>
+                {fg.fgCode} — {fg.fgDescription}
+              </option>
+            ))}
+          </select>
+
+          {(searchTerm || selectedFG !== 'ALL') && (
+            <button
+              onClick={() => {
+                setSearchTerm('');
+                setSelectedFG('ALL');
+              }}
+              className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+            >
+              Reset Filters
+            </button>
+          )}
         </div>
 
         <div className="text-xs text-slate-500 font-medium">

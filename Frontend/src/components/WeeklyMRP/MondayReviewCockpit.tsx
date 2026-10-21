@@ -97,6 +97,8 @@ interface MondayReviewCockpitProps {
   onSelectRole?: (role: UserRole) => void;
   isSidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
+  openingStockDate?: string;
+  onUpdateOpeningStockDate?: (date: string) => void;
 }
 
 export const MondayReviewCockpit: React.FC<MondayReviewCockpitProps> = ({
@@ -119,7 +121,9 @@ export const MondayReviewCockpit: React.FC<MondayReviewCockpitProps> = ({
   currentRole = 'supply_planner',
   onSelectRole,
   isSidebarCollapsed = true,
-  onToggleSidebar
+  onToggleSidebar,
+  openingStockDate,
+  onUpdateOpeningStockDate
 }) => {
   // Role-Based Access Control (RBAC)
   const isSupplyPlanner = currentRole === 'supply_planner';
@@ -300,7 +304,8 @@ export const MondayReviewCockpit: React.FC<MondayReviewCockpitProps> = ({
     stockList,
     vendorDeliverySchedules,
     mondayReviewActions,
-    planFreezeList
+    planFreezeList,
+    openingStockDate
   );
 
   // Identify all "OK" Finished Goods (100% component availability, no deficits, max buildable covers gross target)
@@ -1220,6 +1225,23 @@ export const MondayReviewCockpit: React.FC<MondayReviewCockpitProps> = ({
                 ))}
               </select>
             </div>
+
+            {/* Baseline Opening Stock Date Badge */}
+            {openingStockDate && (
+              <div
+                className="flex items-center gap-1.5 bg-teal-50 border border-teal-200 rounded px-2 py-1 text-xs text-teal-800"
+                title="Opening Stock Baseline Date (SAP MB52 Point-in-Time Snapshot Date). MB51 movements before this date are already counted in physical inventory."
+              >
+                <Calendar className="w-3.5 h-3.5 text-teal-600" />
+                <span className="font-medium text-[11px]">Baseline:</span>
+                <input
+                  type="date"
+                  value={openingStockDate}
+                  onChange={(e) => onUpdateOpeningStockDate?.(e.target.value)}
+                  className="bg-white border border-teal-300 rounded px-1 py-0.5 text-[11px] font-mono font-bold text-teal-900 focus:outline-hidden cursor-pointer"
+                />
+              </div>
+            )}
 
             {/* Week Selector Tabs */}
             <div className="flex items-center bg-slate-100 p-0.5 rounded border border-slate-200 text-xs">

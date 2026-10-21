@@ -125,6 +125,11 @@ export default function App() {
     return saved ? JSON.parse(saved) : INITIAL_STOCK_REPORT;
   });
 
+  const [openingStockDate, setOpeningStockDate] = useState<string>(() => {
+    const saved = localStorage.getItem('sap_opening_stock_date');
+    return saved || '2026-08-01';
+  });
+
   const [vendorDeliverySchedules, setVendorDeliverySchedules] = useState<VendorDeliverySchedule[]>(() => {
     const saved = localStorage.getItem('sap_vendor_delivery_schedules');
     return saved ? JSON.parse(saved) : INITIAL_VENDOR_DELIVERY_SCHEDULES;
@@ -181,6 +186,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('sap_stock', JSON.stringify(stockList));
   }, [stockList]);
+
+  useEffect(() => {
+    localStorage.setItem('sap_opening_stock_date', openingStockDate);
+  }, [openingStockDate]);
 
   useEffect(() => {
     localStorage.setItem('sap_vendor_delivery_schedules', JSON.stringify(vendorDeliverySchedules));
@@ -290,7 +299,9 @@ export default function App() {
     boms,
     vendorBuyers,
     mb51List,
-    stockList
+    stockList,
+    vendorDeliverySchedules,
+    openingStockDate
   );
   const criticalShortagesCount = rmSummaries.filter((s) => s.overallStatus === 'SHORTAGE').length;
 
@@ -411,6 +422,8 @@ export default function App() {
                 onSelectRole={setCurrentRole}
                 isSidebarCollapsed={isSidebarCollapsed}
                 onToggleSidebar={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+                openingStockDate={openingStockDate}
+                onUpdateOpeningStockDate={setOpeningStockDate}
               />
             )}
 
@@ -483,8 +496,11 @@ export default function App() {
                 vendorBuyers={vendorBuyers}
                 mb51List={mb51List}
                 stockList={stockList}
+                vendorDeliverySchedules={vendorDeliverySchedules}
                 selectedMonth={selectedMonth}
                 onSelectMonth={setSelectedMonth}
+                onNavigateToDeliverySchedule={() => setActiveSubView('update_delivery_schedule')}
+                openingStockDate={openingStockDate}
               />
             )}
 
@@ -497,6 +513,7 @@ export default function App() {
                 stockList={stockList}
                 selectedMonth={selectedMonth}
                 onSelectMonth={setSelectedMonth}
+                openingStockDate={openingStockDate}
               />
             )}
 
@@ -537,6 +554,8 @@ export default function App() {
               <StockReportManager
                 stockList={stockList}
                 onUpdateStock={setStockList}
+                openingStockDate={openingStockDate}
+                onUpdateOpeningStockDate={setOpeningStockDate}
               />
             )}
 

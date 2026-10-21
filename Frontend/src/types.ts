@@ -162,6 +162,7 @@ export interface StockReportItem {
   safetyStock: number;
   plant: string;
   lastUpdated?: string;
+  stockDate?: string; // Opening stock date (YYYY-MM-DD) — baseline snapshot date
 }
 
 // ============================================================================
@@ -210,12 +211,15 @@ export interface RMWeeklyRequirementSummary {
     weekLabel: string;
     grossRequirement: number; // Sum of (FG Plan * BOM Qty)
     actualInwardReceipt: number; // Sum of MB51 Mvt 101 (prefix non-7)
+    scheduledDeliveryQty?: number; // Active Vendor Delivery Commitments
+    totalInwardSupply?: number; // Effective inward supply (actual or scheduled)
     projectedStock: number;
     deficit: number; // If projectedStock < safetyStock or < 0
     status: 'OK' | 'WARNING' | 'SHORTAGE';
   }[];
   totalGrossRequirement: number;
   totalInwardReceived: number;
+  totalScheduledDelivery?: number;
   overallStatus: 'OK' | 'WARNING' | 'SHORTAGE';
   maxShortageQty: number;
 }

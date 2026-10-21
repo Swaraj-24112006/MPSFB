@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Package,
   Upload,
@@ -16,7 +16,10 @@ import {
   FileSpreadsheet,
   Info,
   X,
-  Loader2
+  Loader2,
+  Calendar,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 import { StockReportItem } from '../../types';
 import { stockService } from '../../services/stockService';
@@ -24,11 +27,15 @@ import { stockService } from '../../services/stockService';
 interface StockReportManagerProps {
   stockList: StockReportItem[];
   onUpdateStock: (items: StockReportItem[]) => void;
+  openingStockDate?: string;
+  onUpdateOpeningStockDate?: (date: string) => void;
 }
 
 export const StockReportManager: React.FC<StockReportManagerProps> = ({
   stockList,
-  onUpdateStock
+  onUpdateStock,
+  openingStockDate = new Date().toISOString().slice(0, 10),
+  onUpdateOpeningStockDate
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState<'ALL' | 'FG' | 'RM' | 'PM'>('ALL');
@@ -40,6 +47,19 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [uploadMode, setUploadMode] = useState<'replace' | 'append'>('replace');
   const [uploadWarnings, setUploadWarnings] = useState<string[]>([]);
+  const [uploadStockDate, setUploadStockDate] = useState<string>(
+    openingStockDate || new Date().toISOString().slice(0, 10)
+  );
+
+  useEffect(() => {
+    if (openingStockDate) {
+      setUploadStockDate(openingStockDate);
+    }
+  }, [openingStockDate]);
+
+  // Checkbox selection state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const selectAllCheckboxRef = useRef<HTMLInputElement>(null);
 
   const [formData, setFormData] = useState<Partial<StockReportItem>>({
     partNumber: '',
@@ -51,7 +71,8 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
     storageLocation: 'SL01',
     uom: 'PC',
     safetyStock: 500,
-    plant: '1001'
+    plant: '1001',
+    stockDate: openingStockDate || new Date().toISOString().slice(0, 10)
   });
 
   const [csvInput, setCsvInput] = useState('');
@@ -74,6 +95,57 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
     return matchesSearch && matchesType;
   });
 
+  // Checkbox selection logic
+  const isAllSelected =
+    filteredStocks.length > 0 &&
+    filteredStocks.every((item) => selectedIds.has(item.id));
+  const isSomeSelected =
+    filteredStocks.some((item) => selectedIds.has(item.id)) && !isAllSelected;
+
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = isSomeSelected;
+    }
+  }, [isSomeSelected]);
+
+  const handleToggleSelectAll = () => {
+    if (isAllSelected) {
+      const next = new Set(selectedIds);
+      filteredStocks.forEach((item) => next.delete(item.id));
+      setSelectedIds(next);
+    } else {
+      const next = new Set(selectedIds);
+      filteredStocks.forEach((item) => next.add(item.id));
+      setSelectedIds(next);
+    }
+  };
+
+  const handleToggleSelect = (id: string) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    setSelectedIds(next);
+  };
+
+  const handleDeleteSelected = () => {
+    if (selectedIds.size === 0) return;
+    const count = selectedIds.size;
+    if (
+      window.confirm(
+        `Are you sure you want to delete ${count} selected stock record${
+          count > 1 ? 's' : ''
+        }?`
+      )
+    ) {
+      const remaining = stockList.filter((item) => !selectedIds.has(item.id));
+      onUpdateStock(remaining);
+      setSelectedIds(new Set());
+    }
+  };
+
   // KPI calculations
   const totalFGStock = stockList
     .filter((s) => s.materialType === 'FG')
@@ -94,7 +166,10 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
   const handleOpenAddModal = (existing?: StockReportItem) => {
     if (existing) {
       setEditingItem(existing);
-      setFormData(existing);
+      setFormData({
+        ...existing,
+        stockDate: existing.stockDate || openingStockDate || new Date().toISOString().slice(0, 10)
+      });
     } else {
       setEditingItem(null);
       setFormData({
@@ -107,7 +182,8 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
         storageLocation: 'SL01-Raw Materials',
         uom: 'PC',
         safetyStock: 500,
-        plant: '1001'
+        plant: '1001',
+        stockDate: openingStockDate || new Date().toISOString().slice(0, 10)
       });
     }
     setIsAddModalOpen(true);
@@ -124,6 +200,7 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
       formData.partNumber,
       formData.materialType
     );
+    const itemStockDate = formData.stockDate || openingStockDate || new Date().toISOString().slice(0, 10);
 
     setIsSubmitting(true);
     try {
@@ -137,7 +214,8 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
           storageLocation: formData.storageLocation || 'SL01',
           uom: formData.uom || 'PC',
           safetyStock: Number(formData.safetyStock) || 500,
-          plant: formData.plant || '1001'
+          plant: formData.plant || '1001',
+          stockDate: itemStockDate
         });
       } else {
         await stockService.createStockItem({
@@ -149,7 +227,8 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
           storageLocation: formData.storageLocation || 'SL01',
           uom: formData.uom || 'PC',
           safetyStock: Number(formData.safetyStock) || 500,
-          plant: formData.plant || '1001'
+          plant: formData.plant || '1001',
+          stockDate: itemStockDate
         });
       }
 
@@ -167,7 +246,8 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
                 ...s,
                 ...formData,
                 materialType: type,
-                lastUpdated: new Date().toISOString().slice(0, 10)
+                stockDate: itemStockDate,
+                lastUpdated: itemStockDate
               } as StockReportItem)
             : s
         );
@@ -185,7 +265,8 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
           uom: formData.uom || 'PC',
           safetyStock: Number(formData.safetyStock) || 500,
           plant: formData.plant || '1001',
-          lastUpdated: new Date().toISOString().slice(0, 10)
+          stockDate: itemStockDate,
+          lastUpdated: itemStockDate
         };
         onUpdateStock([newItem, ...stockList]);
       }
@@ -240,13 +321,15 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
       const resp = await stockService.bulkUpload({
         file: selectedFile || undefined,
         csv_text: selectedFile ? undefined : csvInput.trim(),
-        mode: uploadMode
+        mode: uploadMode,
+        opening_stock_date: uploadStockDate
       });
 
       const refreshed = await stockService.getStockReport();
       if (refreshed && Array.isArray(refreshed)) {
         onUpdateStock(refreshed);
       }
+      onUpdateOpeningStockDate?.(uploadStockDate);
       if (resp.warnings && resp.warnings.length > 0) {
         setUploadWarnings(resp.warnings);
       }
@@ -256,6 +339,7 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
         `• Total Rows: ${resp.total_rows}\n` +
         `• Successfully Processed: ${resp.imported_rows}\n` +
         `• Errors / Skipped: ${resp.error_rows}\n` +
+        `• Baseline Date: ${uploadStockDate}\n` +
         `• Mode: ${uploadMode === 'replace' ? 'Replace / Upsert' : 'Append'}` +
         (resp.warnings && resp.warnings.length > 0 ? `\n• Warnings: ${resp.warnings.length}` : '')
       );
@@ -313,7 +397,8 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
               storageLocation: sloc,
               uom,
               plant: '1001',
-              lastUpdated: new Date().toISOString().slice(0, 10)
+              stockDate: uploadStockDate,
+              lastUpdated: uploadStockDate || new Date().toISOString().slice(0, 10)
             });
           }
         }
@@ -325,6 +410,7 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
       }
 
       onUpdateStock([...parsed, ...stockList]);
+      onUpdateOpeningStockDate?.(uploadStockDate);
       setIsUploadModalOpen(false);
       setSelectedFile(null);
       setCsvInput('');
@@ -338,6 +424,7 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
       'Part Number',
       'Material Description',
       'Type',
+      'Opening Stock Date',
       'Unrestricted Stock',
       'In Quality Insp',
       'Blocked Stock',
@@ -351,6 +438,7 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
       `"${s.partNumber}"`,
       `"${s.materialDescription}"`,
       `"${s.materialType}"`,
+      `"${s.stockDate || s.lastUpdated?.slice(0, 10) || openingStockDate}"`,
       s.unrestrictedStock,
       s.inQualityInsp,
       s.blocked,
@@ -365,7 +453,7 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Stock_Report_MB52_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = `Stock_Report_MB52_${uploadStockDate || new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
   };
 
@@ -378,9 +466,23 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
             <Boxes className="w-5 h-5" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-slate-900">Monday Upload: Stock Report (SAP MB52)</h1>
-            <p className="text-sm text-slate-500">
-              Current on-hand unrestricted inventory balances for Finished Goods (prefix 7) and RM/PM materials
+          <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-xl font-bold text-slate-900">Monday Upload: Stock Report (SAP MB52)</h1>
+              {/* Baseline Opening Stock Date Badge */}
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-teal-50 text-teal-800 border border-teal-200 rounded-lg text-xs font-semibold">
+                <Calendar className="w-3.5 h-3.5 text-teal-600" />
+                <span>Opening Stock As Of:</span>
+                <input
+                  type="date"
+                  value={openingStockDate}
+                  onChange={(e) => onUpdateOpeningStockDate?.(e.target.value)}
+                  className="bg-white border border-teal-300 rounded px-1.5 py-0.5 text-xs font-mono font-bold text-teal-900 focus:outline-none focus:ring-1 focus:ring-teal-500 cursor-pointer"
+                  title="Click to change baseline opening stock date for all calculations"
+                />
+              </div>
+            </div>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Current on-hand unrestricted inventory balances. Calculations across Weekly MRP, Monday Review & Shortages roll forward from this baseline date.
             </p>
           </div>
         </div>
@@ -407,6 +509,15 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
             <Plus className="w-4 h-4" />
             Add Stock Item
           </button>
+          {selectedIds.size > 0 && (
+            <button
+              onClick={handleDeleteSelected}
+              className="flex items-center gap-2 px-3.5 py-2 text-sm font-semibold text-red-700 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors"
+            >
+              <Trash2 className="w-4 h-4 text-red-500" />
+              Delete Selected ({selectedIds.size})
+            </button>
+          )}
         </div>
       </div>
 
@@ -534,6 +645,19 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
           <table className="w-full text-left border-collapse text-sm">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 text-xs uppercase tracking-wider font-semibold">
+                {/* Select All Checkbox */}
+                <th className="py-3.5 px-4 w-12 text-center">
+                  <div className="flex items-center justify-center">
+                    <input
+                      type="checkbox"
+                      ref={selectAllCheckboxRef}
+                      checked={isAllSelected}
+                      onChange={handleToggleSelectAll}
+                      className="w-4 h-4 text-teal-600 rounded border-slate-300 focus:ring-teal-500 cursor-pointer"
+                      title={isAllSelected ? 'Deselect all visible records' : 'Select all visible records'}
+                    />
+                  </div>
+                </th>
                 <th className="py-3.5 px-4">Part Number</th>
                 <th className="py-3.5 px-4">Material Description</th>
                 <th className="py-3.5 px-4 text-center">Type</th>
@@ -542,6 +666,7 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
                 <th className="py-3.5 px-4 text-right">Safety Stock</th>
                 <th className="py-3.5 px-4 text-center">UOM</th>
                 <th className="py-3.5 px-4">Storage Location</th>
+                <th className="py-3.5 px-4 text-center">Opening Date</th>
                 <th className="py-3.5 px-4 text-center">Stock Health</th>
                 <th className="py-3.5 px-4 text-right">Actions</th>
               </tr>
@@ -549,16 +674,34 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
             <tbody className="divide-y divide-slate-200">
               {filteredStocks.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center text-slate-400">
+                <td colSpan={12} className="py-8 text-center text-slate-400">
                     No stock records match your search or filter.
                   </td>
                 </tr>
               ) : (
                 filteredStocks.map((stock) => {
                   const isLow = stock.unrestrictedStock < stock.safetyStock;
+                  const isSelected = selectedIds.has(stock.id);
 
                   return (
-                    <tr key={stock.id} className="hover:bg-slate-50 transition-colors">
+                    <tr
+                      key={stock.id}
+                      className={`transition-colors ${
+                        isSelected ? 'bg-teal-50/70 hover:bg-teal-50' : 'hover:bg-slate-50'
+                      }`}
+                    >
+                      {/* Row Checkbox */}
+                      <td className="py-3 px-4 w-12 text-center">
+                        <div className="flex items-center justify-center">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleToggleSelect(stock.id)}
+                            className="w-4 h-4 text-teal-600 rounded border-slate-300 focus:ring-teal-500 cursor-pointer"
+                            aria-label={`Select ${stock.partNumber}`}
+                          />
+                        </div>
+                      </td>
                       <td className="py-3 px-4 font-mono font-bold text-slate-900 text-xs">
                         <span
                           className={`px-1.5 py-0.5 rounded border ${
@@ -600,6 +743,9 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
                       </td>
                       <td className="py-3 px-4 text-xs font-mono text-slate-600">
                         {stock.storageLocation}
+                      </td>
+                      <td className="py-3 px-4 text-center font-mono text-xs text-slate-600">
+                        {stock.stockDate || stock.lastUpdated?.slice(0, 10) || openingStockDate}
                       </td>
                       <td className="py-3 px-4 text-center">
                         {isLow ? (
@@ -751,6 +897,25 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
                 </div>
               </div>
 
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Opening Stock Date (Baseline Snapshot Date)
+                </label>
+                <div className="relative">
+                  <Calendar className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-teal-600" />
+                  <input
+                    type="date"
+                    value={formData.stockDate || openingStockDate || new Date().toISOString().slice(0, 10)}
+                    onChange={(e) => setFormData({ ...formData, stockDate: e.target.value })}
+                    className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 font-mono"
+                    title="Snapshot date when this physical inventory was verified"
+                  />
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5">
+                  Transactions prior to this date are already counted in physical stock.
+                </div>
+              </div>
+
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-200">
                 <button
                   type="button"
@@ -797,6 +962,26 @@ export const StockReportManager: React.FC<StockReportManagerProps> = ({
             </div>
 
             <form onSubmit={handleCSVUpload} className="space-y-4">
+              {/* Baseline Opening Stock Date Selector */}
+              <div className="bg-teal-50/70 border border-teal-200 rounded-lg p-3">
+                <label className="block text-xs font-semibold text-teal-900 mb-1">
+                  Opening Stock Baseline Date (Snapshot As Of) *
+                </label>
+                <div className="relative max-w-xs">
+                  <Calendar className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-teal-600" />
+                  <input
+                    type="date"
+                    required
+                    value={uploadStockDate}
+                    onChange={(e) => setUploadStockDate(e.target.value)}
+                    className="w-full pl-9 pr-3 py-1.5 text-xs font-mono font-bold text-teal-900 border border-teal-300 rounded-lg focus:ring-2 focus:ring-teal-500 bg-white"
+                  />
+                </div>
+                <p className="text-[11px] text-teal-700 mt-1">
+                  All MB51 receipts and dispatches prior to this date are considered already counted inside this snapshot and will not be double-adjusted.
+                </p>
+              </div>
+
               {/* Upload Mode Selector */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">

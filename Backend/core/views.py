@@ -2072,6 +2072,10 @@ class StockListCreateView(generics.ListCreateAPIView):
         if storage_location:
             qs = qs.filter(storage_location__iexact=storage_location.strip())
 
+        stock_date = self.request.query_params.get('stock_date')
+        if stock_date:
+            qs = qs.filter(stock_date=stock_date.strip())
+
         below_safety = self.request.query_params.get('below_safety_stock')
         if below_safety and below_safety.lower() in ('true', '1', 'yes'):
             from django.db.models import F
@@ -2156,6 +2160,21 @@ class StockBulkUploadView(APIView):
         csv_text = request.data.get('csv_text') or request.data.get('content')
         mode = (request.data.get('mode') or request.query_params.get('mode') or 'replace').strip().lower()
 
+        # Baseline opening stock date passed with upload
+        opening_stock_date_raw = (
+            request.data.get('opening_stock_date') or
+            request.query_params.get('opening_stock_date') or
+            request.data.get('stock_date') or
+            request.query_params.get('stock_date')
+        )
+        opening_stock_date = None
+        if opening_stock_date_raw:
+            from datetime import datetime
+            try:
+                opening_stock_date = datetime.strptime(str(opening_stock_date_raw).strip(), '%Y-%m-%d').date()
+            except Exception:
+                opening_stock_date = None
+
         if not file_obj and not csv_text:
             return Response(
                 {"error": "Please provide a file (.xlsx, .csv) or pasted text in 'csv_text'."},
@@ -2228,6 +2247,7 @@ class StockBulkUploadView(APIView):
             with transaction.atomic():
                 for row in valid_rows:
                     mat_type = MaterialTypeService.derive(row['part_number'])
+                    row_stock_date = row.get('stock_date') or opening_stock_date
 
                     if mode == 'replace':
                         # Upsert on (part_number, storage_location)
@@ -2244,6 +2264,7 @@ class StockBulkUploadView(APIView):
                                 'uom': row['uom'],
                                 'plant': row['plant'],
                                 'upload_batch': batch,
+                                'stock_date': row_stock_date,
                             }
                         )
                     else:
@@ -2269,6 +2290,7 @@ class StockBulkUploadView(APIView):
                             storage_location=row['storage_location'],
                             plant=row['plant'],
                             upload_batch=batch,
+                            stock_date=row_stock_date,
                         )
 
                     imported_count += 1
@@ -2327,6 +2349,10 @@ class StockExportCSVView(APIView):
         if storage_location:
             qs = qs.filter(storage_location__iexact=storage_location.strip())
 
+        stock_date = request.query_params.get('stock_date')
+        if stock_date:
+            qs = qs.filter(stock_date=stock_date.strip())
+
         below_safety = request.query_params.get('below_safety_stock')
         if below_safety and below_safety.lower() in ('true', '1', 'yes'):
             from django.db.models import F
@@ -2339,6 +2365,7 @@ class StockExportCSVView(APIView):
             'Part Number',
             'Material Description',
             'Material Type',
+            'Opening Stock Date',
             'Unrestricted Stock',
             'In Quality Inspection',
             'Blocked',
@@ -2357,6 +2384,7 @@ class StockExportCSVView(APIView):
                     item.part_number,
                     item.material_description,
                     item.material_type,
+                    item.stock_date.isoformat() if item.stock_date else '',
                     float(item.unrestricted_stock),
                     float(item.in_quality_insp),
                     float(item.blocked),

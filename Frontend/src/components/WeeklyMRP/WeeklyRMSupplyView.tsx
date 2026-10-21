@@ -16,7 +16,11 @@ import {
   ArrowDownLeft,
   Share2,
   FileSpreadsheet,
-  AlertCircle
+  AlertCircle,
+  Truck,
+  RotateCcw,
+  ExternalLink,
+  Send
 } from 'lucide-react';
 import {
   MonthlyPlanItem,
@@ -25,6 +29,7 @@ import {
   VendorBuyerItem,
   MB51TransactionItem,
   StockReportItem,
+  VendorDeliverySchedule,
   RMWeeklyRequirementSummary
 } from '../../types';
 import { computeRMWeeklyRequirements } from '../../utils/weeklyMrpEngine';
@@ -36,8 +41,11 @@ interface WeeklyRMSupplyViewProps {
   vendorBuyers: VendorBuyerItem[];
   mb51List: MB51TransactionItem[];
   stockList: StockReportItem[];
+  vendorDeliverySchedules?: VendorDeliverySchedule[];
   selectedMonth: string;
   onSelectMonth: (month: string) => void;
+  onNavigateToDeliverySchedule?: () => void;
+  openingStockDate?: string;
 }
 
 export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
@@ -47,8 +55,11 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
   vendorBuyers,
   mb51List,
   stockList,
+  vendorDeliverySchedules = [],
   selectedMonth,
-  onSelectMonth
+  onSelectMonth,
+  onNavigateToDeliverySchedule,
+  openingStockDate
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [buyerFilter, setBuyerFilter] = useState<string>('ALL');
@@ -67,7 +78,9 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
     boms,
     vendorBuyers,
     mb51List,
-    stockList
+    stockList,
+    vendorDeliverySchedules,
+    openingStockDate
   );
 
   const uniqueBuyers = Array.from(new Set(summaries.map((s) => s.buyerName))).filter(Boolean);
@@ -105,12 +118,15 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
       'Safety Stock',
       ...monthWeeks.flatMap((w) => [
         `${w.weekLabel} Gross Req`,
-        `${w.weekLabel} 101 Inward`,
+        `${w.weekLabel} MB51 101 Inward`,
+        `${w.weekLabel} Sched Delivery`,
+        `${w.weekLabel} Total Inward Supply`,
         `${w.weekLabel} Projected Stock`,
         `${w.weekLabel} Status`
       ]),
       'Total Gross Req',
-      'Total 101 Inward',
+      'Total MB51 Inward',
+      'Total Sched Delivery',
       'Overall Status'
     ];
 
@@ -118,6 +134,8 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
       const weekCols = s.weeks.flatMap((w) => [
         w.grossRequirement,
         w.actualInwardReceipt,
+        w.scheduledDeliveryQty || 0,
+        w.totalInwardSupply || (w.actualInwardReceipt + (w.scheduledDeliveryQty || 0)),
         w.projectedStock,
         w.status
       ]);
@@ -135,6 +153,7 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
         ...weekCols,
         s.totalGrossRequirement,
         s.totalInwardReceived,
+        s.totalScheduledDelivery || 0,
         `"${s.overallStatus}"`
       ];
     });
@@ -148,6 +167,65 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
     link.click();
   };
 
+  const handleExportSingleComponentCSV = (comp: RMWeeklyRequirementSummary) => {
+    const headers = [
+      'Week Bucket',
+      'Gross Requirement',
+      'Actual 101 Inward (MB51)',
+      'Promised Schedule (Commitments)',
+      'Total Inward Supply',
+      'Projected Stock',
+      'Deficit',
+      'Status'
+    ];
+
+    const rows = comp.weeks.map((w) => [
+      `"${w.weekLabel}"`,
+      w.grossRequirement,
+      w.actualInwardReceipt,
+      w.scheduledDeliveryQty || 0,
+      w.totalInwardSupply || (w.actualInwardReceipt + (w.scheduledDeliveryQty || 0)),
+      w.projectedStock,
+      w.deficit,
+      `"${w.status}"`
+    ]);
+
+    const csvContent = [
+      `"Component Code","${comp.componentCode}"`,
+      `"Description","${comp.componentDescription}"`,
+      `"Category","${comp.category}"`,
+      `"Current Stock","${comp.currentStock}"`,
+      `"Safety Stock","${comp.safetyStock}"`,
+      `"Buyer","${comp.buyerName}"`,
+      `"Supplier","${comp.vendorName} (${comp.vendorCode})"`,
+      '',
+      headers.join(','),
+      ...rows.map((r) => r.join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Shortage_Report_${comp.componentCode}_${selectedMonth}.csv`;
+    link.click();
+  };
+
+  const isAnyFilterActive =
+    Boolean(searchTerm) ||
+    buyerFilter !== 'ALL' ||
+    categoryFilter !== 'ALL' ||
+    statusFilter !== 'ALL';
+
+  // Find buyer details for active modal
+  const activeBuyerInfo = selectedCompForDetail
+    ? vendorBuyers.find(
+        (vb) =>
+          vb.suppliedComponents &&
+          vb.suppliedComponents.includes(selectedCompForDetail.componentCode)
+      )
+    : null;
+
   return (
     <div className="space-y-6">
       {/* Header Bar */}
@@ -159,7 +237,7 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
           <div>
             <h1 className="text-xl font-bold text-slate-900">Weekly RM/PM MRP & Supply Shortage Matrix</h1>
             <p className="text-sm text-slate-500">
-              Consolidated BOM gross requirements vs current stock vs MB51 101 inward receipts mapped by Buyer & Vendor
+              Consolidated BOM gross requirements vs current stock vs inward supply (MB51 GRNs + delivery commitments) by Buyer & Vendor
             </p>
           </div>
         </div>
@@ -196,37 +274,46 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
             {monthlyPlans.filter((p) => p.month === selectedMonth).length} Active FG Plans
           </span>
           <span className="text-slate-400">|</span>
-          <span className="text-slate-500">Total BOM Multipliers:</span>
-          <span className="px-2.5 py-1 bg-white border border-slate-200 rounded text-slate-800 font-mono">
-            {boms.length} Relations
-          </span>
+          <span className="text-slate-500">Calendar Buckets:</span>
+          {monthWeeks.map((w) => (
+            <span
+              key={w.id}
+              className="px-2.5 py-1 bg-white border border-slate-200 rounded text-slate-800 font-mono"
+            >
+              {w.weekLabel} ({w.daysCount}d)
+            </span>
+          ))}
         </div>
       </div>
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <div className="text-xs text-slate-500 font-medium">Total Gross RM/PM Requirement</div>
+          <div className="text-xs text-slate-500 font-medium">Total Tracked Materials</div>
           <div className="text-2xl font-bold text-slate-900 mt-1 font-mono">
-            {totalGrossReq.toLocaleString()} <span className="text-xs text-slate-500 font-normal">Units</span>
+            {totalRMComponents.toLocaleString()} <span className="text-xs text-slate-500 font-normal">Parts</span>
           </div>
-          <div className="text-xs text-slate-500 mt-1">Exploded across all defined weeks</div>
+          <div className="text-xs text-slate-500 mt-1">Exploded across active month BOMs</div>
         </div>
 
-        <div className="bg-white p-4 rounded-xl border border-red-200 shadow-sm">
-          <div className="text-xs text-red-600 font-medium">Critical Shortages (Deficit)</div>
-          <div className="text-2xl font-bold text-red-600 mt-1 font-mono">
-            {criticalShortageCount} Components
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-xs text-slate-500 font-medium">Critical Shortages</div>
+          <div className="text-2xl font-bold text-red-600 mt-1 font-mono flex items-center gap-2">
+            {criticalShortageCount}
+            {criticalShortageCount > 0 && <AlertTriangle className="w-5 h-5 text-red-500" />}
           </div>
-          <div className="text-xs text-red-500 mt-1">Projected balance below zero</div>
+          <div className="text-xs text-red-700 font-semibold mt-1">
+            Projected negative stock balance
+          </div>
         </div>
 
-        <div className="bg-white p-4 rounded-xl border border-amber-200 shadow-sm">
-          <div className="text-xs text-amber-600 font-medium">Below Safety Stock (Warning)</div>
-          <div className="text-2xl font-bold text-amber-600 mt-1 font-mono">
-            {warningCount} Components
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-xs text-slate-500 font-medium">Low Stock Warnings</div>
+          <div className="text-2xl font-bold text-amber-600 mt-1 font-mono flex items-center gap-2">
+            {warningCount}
+            {warningCount > 0 && <AlertCircle className="w-5 h-5 text-amber-500" />}
           </div>
-          <div className="text-xs text-amber-600 mt-1">Safety buffer breached</div>
+          <div className="text-xs text-slate-500 mt-1">Stock falls below safety threshold</div>
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
@@ -241,7 +328,8 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
       {/* Filters and Search Bar */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-          <div className="relative min-w-[240px]">
+          {/* Search Input */}
+          <div className="relative min-w-[220px]">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
@@ -252,10 +340,11 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
             />
           </div>
 
+          {/* Buyer Filter */}
           <select
             value={buyerFilter}
             onChange={(e) => setBuyerFilter(e.target.value)}
-            className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white text-slate-700 font-medium"
+            className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white text-slate-700 font-medium focus:ring-2 focus:ring-amber-500"
           >
             <option value="ALL">All Buyers ({uniqueBuyers.length})</option>
             {uniqueBuyers.map((buyer) => (
@@ -265,10 +354,45 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
             ))}
           </select>
 
+          {/* Category Filter Toggle (RM vs PM) */}
+          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
+            <button
+              onClick={() => setCategoryFilter('ALL')}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                categoryFilter === 'ALL'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              All Types
+            </button>
+            <button
+              onClick={() => setCategoryFilter('RM')}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                categoryFilter === 'RM'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-emerald-700'
+              }`}
+            >
+              RM Only
+            </button>
+            <button
+              onClick={() => setCategoryFilter('PM')}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                categoryFilter === 'PM'
+                  ? 'bg-purple-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-purple-700'
+              }`}
+            >
+              PM Only
+            </button>
+          </div>
+
+          {/* Status Filter Toggle */}
           <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
             <button
               onClick={() => setStatusFilter('ALL')}
-              className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
+              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
                 statusFilter === 'ALL'
                   ? 'bg-white text-slate-900 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900'
@@ -278,7 +402,7 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
             </button>
             <button
               onClick={() => setStatusFilter('SHORTAGE')}
-              className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
+              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
                 statusFilter === 'SHORTAGE'
                   ? 'bg-red-600 text-white shadow-sm'
                   : 'text-slate-600 hover:text-red-700'
@@ -288,7 +412,7 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
             </button>
             <button
               onClick={() => setStatusFilter('WARNING')}
-              className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
+              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
                 statusFilter === 'WARNING'
                   ? 'bg-amber-600 text-white shadow-sm'
                   : 'text-slate-600 hover:text-amber-700'
@@ -297,9 +421,26 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
               Warning ({warningCount})
             </button>
           </div>
+
+          {/* 1-Click Reset Filters Button */}
+          {isAnyFilterActive && (
+            <button
+              onClick={() => {
+                setSearchTerm('');
+                setBuyerFilter('ALL');
+                setCategoryFilter('ALL');
+                setStatusFilter('ALL');
+              }}
+              className="px-2.5 py-1 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1"
+              title="Reset all search terms and filters"
+            >
+              <RotateCcw className="w-3 h-3 text-slate-500" />
+              Reset
+            </button>
+          )}
         </div>
 
-        <div className="text-xs text-slate-500 font-medium">
+        <div className="text-xs text-slate-500 font-medium whitespace-nowrap">
           Showing <span className="font-bold text-slate-900">{filteredSummaries.length}</span> Materials
         </div>
       </div>
@@ -336,7 +477,9 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
                     <th className="py-1.5 px-2 text-right border-l border-slate-200 text-slate-700">
                       Gross Req
                     </th>
-                    <th className="py-1.5 px-2 text-right text-emerald-700 font-bold">101 Inward</th>
+                    <th className="py-1.5 px-2 text-right text-emerald-700 font-bold" title="Inward Supply: MB51 GRNs + Promised Delivery Commitments">
+                      Inward Supply
+                    </th>
                     <th className="py-1.5 px-2 text-right text-slate-900 font-bold">Proj Stock</th>
                   </React.Fragment>
                 ))}
@@ -400,14 +543,37 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
                       {s.weeks.map((w) => {
                         const isShortage = w.status === 'SHORTAGE';
                         const isWarn = w.status === 'WARNING';
+                        const totalInward =
+                          w.totalInwardSupply ??
+                          (w.actualInwardReceipt + (w.scheduledDeliveryQty || 0));
+                        const hasScheduledOnly =
+                          w.actualInwardReceipt === 0 && (w.scheduledDeliveryQty || 0) > 0;
 
                         return (
                           <React.Fragment key={w.weekId}>
                             <td className="py-2.5 px-2 text-right font-mono text-slate-700 border-l border-slate-200">
                               {w.grossRequirement.toLocaleString()}
                             </td>
-                            <td className="py-2.5 px-2 text-right font-mono font-bold text-emerald-700 bg-emerald-50/20">
-                              {w.actualInwardReceipt.toLocaleString()}
+                            <td className="py-2.5 px-2 text-right font-mono bg-emerald-50/20">
+                              <div className="flex flex-col items-end leading-tight">
+                                <span
+                                  className={
+                                    w.actualInwardReceipt > 0
+                                      ? 'text-emerald-700 font-bold'
+                                      : hasScheduledOnly
+                                      ? 'text-blue-700 font-semibold flex items-center gap-0.5'
+                                      : 'text-slate-400 font-normal'
+                                  }
+                                >
+                                  {hasScheduledOnly && <Truck className="w-2.5 h-2.5 text-blue-500 inline mr-0.5" />}
+                                  {totalInward.toLocaleString()}
+                                </span>
+                                {(w.scheduledDeliveryQty || 0) > 0 && w.actualInwardReceipt > 0 && (
+                                  <span className="text-[8px] text-slate-500 font-normal">
+                                    {w.actualInwardReceipt} rec + {w.scheduledDeliveryQty} sch
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td
                               className={`py-2.5 px-2 text-right font-mono font-bold ${
@@ -456,7 +622,7 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
       {/* Component Detail & Expediting Modal */}
       {selectedCompForDetail && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 border border-slate-200 animate-in fade-in zoom-in-95 duration-150 space-y-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 border border-slate-200 animate-in fade-in zoom-in-95 duration-150 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-start justify-between border-b border-slate-200 pb-3">
               <div>
                 <div className="flex items-center gap-2">
@@ -472,6 +638,11 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
                   >
                     {selectedCompForDetail.category}
                   </span>
+                  {selectedCompForDetail.overallStatus === 'SHORTAGE' && (
+                    <span className="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 border border-red-200 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" /> Critical Shortage
+                    </span>
+                  )}
                 </div>
                 <h3 className="text-base font-bold text-slate-900 mt-1">
                   {selectedCompForDetail.componentDescription}
@@ -479,7 +650,7 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
               </div>
               <button
                 onClick={() => setSelectedCompForDetail(null)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-lg"
+                className="text-slate-400 hover:text-slate-600 font-bold text-lg p-1"
               >
                 ✕
               </button>
@@ -495,6 +666,25 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
                 <div className="font-bold text-slate-900 text-sm">
                   {selectedCompForDetail.buyerName}
                 </div>
+                {activeBuyerInfo?.buyerEmail && (
+                  <div className="text-slate-600 mt-1 flex items-center gap-1">
+                    <Mail className="w-3 h-3 text-slate-400" />
+                    <a
+                      href={`mailto:${activeBuyerInfo.buyerEmail}`}
+                      className="text-blue-600 hover:underline"
+                    >
+                      {activeBuyerInfo.buyerEmail}
+                    </a>
+                  </div>
+                )}
+                {activeBuyerInfo?.buyerPhone && (
+                  <div className="text-slate-600 mt-0.5 flex items-center gap-1">
+                    <Phone className="w-3 h-3 text-slate-400" />
+                    <a href={`tel:${activeBuyerInfo.buyerPhone}`} className="hover:underline">
+                      {activeBuyerInfo.buyerPhone}
+                    </a>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -507,6 +697,9 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
                 </div>
                 <div className="text-slate-500 mt-0.5">
                   Procurement Lead Time: <strong>{selectedCompForDetail.leadTimeDays} Days</strong>
+                </div>
+                <div className="text-slate-500 mt-0.5">
+                  Stock on Hand: <strong>{selectedCompForDetail.currentStock.toLocaleString()}</strong> | Safety: <strong>{selectedCompForDetail.safetyStock.toLocaleString()}</strong>
                 </div>
               </div>
             </div>
@@ -544,8 +737,9 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
                   <tr>
                     <th className="p-2">Week Bucket</th>
                     <th className="p-2 text-right">Gross Req</th>
-                    <th className="p-2 text-right">101 Inward (MB51)</th>
-                    <th className="p-2 text-right">Projected Stock</th>
+                    <th className="p-2 text-right">MB51 (GRN)</th>
+                    <th className="p-2 text-right">Sched Delivery</th>
+                    <th className="p-2 text-right">Proj Stock</th>
                     <th className="p-2 text-center">Status</th>
                   </tr>
                 </thead>
@@ -556,6 +750,9 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
                       <td className="p-2 text-right font-mono">{w.grossRequirement.toLocaleString()}</td>
                       <td className="p-2 text-right font-mono font-bold text-emerald-700">
                         {w.actualInwardReceipt.toLocaleString()}
+                      </td>
+                      <td className="p-2 text-right font-mono font-bold text-blue-700">
+                        {(w.scheduledDeliveryQty || 0).toLocaleString()}
                       </td>
                       <td
                         className={`p-2 text-right font-mono font-bold ${
@@ -583,10 +780,63 @@ export const WeeklyRMSupplyView: React.FC<WeeklyRMSupplyViewProps> = ({
               </table>
             </div>
 
-            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
+            {/* Expediting & Communication Action Buttons */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-200">
+              <div className="flex items-center gap-2">
+                {/* Email Buyer Button */}
+                <button
+                  onClick={() => {
+                    const recipient = activeBuyerInfo?.buyerEmail || 'buyer@kspg.internal';
+                    const subject = encodeURIComponent(
+                      `[URGENT] RM Shortage Alert: ${selectedCompForDetail.componentCode} - ${selectedCompForDetail.componentDescription}`
+                    );
+                    const body = encodeURIComponent(
+                      `Dear ${selectedCompForDetail.buyerName},\n\n` +
+                        `Please note an operational supply shortage for component ${selectedCompForDetail.componentCode} (${selectedCompForDetail.componentDescription}).\n\n` +
+                        `Month: ${selectedMonth}\n` +
+                        `Current Stock: ${selectedCompForDetail.currentStock.toLocaleString()}\n` +
+                        `Safety Stock: ${selectedCompForDetail.safetyStock.toLocaleString()}\n` +
+                        `Maximum Shortage Deficit: -${selectedCompForDetail.maxShortageQty.toLocaleString()} units\n` +
+                        `Assigned Supplier: ${selectedCompForDetail.vendorName} (${selectedCompForDetail.vendorCode})\n` +
+                        `Lead Time: ${selectedCompForDetail.leadTimeDays} days\n\n` +
+                        `Please expedite vendor delivery commitments to prevent production stoppage.\n\n` +
+                        `Generated from KSPG Cockpit MRP Operations.`
+                    );
+                    window.open(`mailto:${recipient}?subject=${subject}&body=${body}`, '_blank');
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors flex items-center gap-1.5"
+                >
+                  <Mail className="w-3.5 h-3.5" />
+                  Email Buyer
+                </button>
+
+                {/* Export Single Component CSV */}
+                <button
+                  onClick={() => handleExportSingleComponentCSV(selectedCompForDetail)}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition-colors flex items-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-slate-500" />
+                  Export Part CSV
+                </button>
+
+                {/* Shortcut to Update Delivery Schedule */}
+                {onNavigateToDeliverySchedule && (
+                  <button
+                    onClick={() => {
+                      setSelectedCompForDetail(null);
+                      onNavigateToDeliverySchedule();
+                    }}
+                    className="px-3 py-1.5 text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition-colors flex items-center gap-1.5"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5 text-amber-600" />
+                    Update Delivery Schedule
+                  </button>
+                )}
+              </div>
+
               <button
                 onClick={() => setSelectedCompForDetail(null)}
-                className="px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                className="px-4 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
               >
                 Close Details
               </button>

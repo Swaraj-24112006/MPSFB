@@ -212,6 +212,9 @@ class StockParser:
             elif any(k in norm_clean for k in ['plant', 'werks']):
                 if 'plant' not in header_map:
                     header_map['plant'] = idx
+            elif any(k in norm_clean for k in ['stock date', 'opening date', 'opening stock date', 'as of date', 'baseline date', 'stock_date', 'date']):
+                if 'stock_date' not in header_map:
+                    header_map['stock_date'] = idx
 
         # If no explicit part_number mapping found, check first cell that has 'part' or 'material'
         if 'part_number' not in header_map:
@@ -235,7 +238,7 @@ class StockParser:
         Positional fallback:
           [0] part_number, [1] description, [2] unrestricted_stock,
           [3] in_quality_insp, [4] blocked, [5] safety_stock,
-          [6] uom, [7] storage_location
+          [6] uom, [7] storage_location, [8] plant, [9] stock_date
         """
         def get_val(key: str, default_pos: int, fallback: str = '') -> str:
             if header_map and key in header_map:
@@ -256,6 +259,17 @@ class StockParser:
         uom = get_val('uom', 6, 'PC') or 'PC'
         sloc = get_val('storage_location', 7, 'SL01') or 'SL01'
         plant = get_val('plant', 8, '1001') or '1001'
+        stock_date_raw = get_val('stock_date', 9, '')
+
+        parsed_stock_date = None
+        if stock_date_raw:
+            from datetime import datetime
+            for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d'):
+                try:
+                    parsed_stock_date = datetime.strptime(stock_date_raw.strip(), fmt).date()
+                    break
+                except ValueError:
+                    pass
 
         extracted = {
             "row_index": row_index,
@@ -268,6 +282,7 @@ class StockParser:
             "uom": uom,
             "storage_location": sloc,
             "plant": plant,
+            "stock_date": parsed_stock_date,
         }
 
         # Validate part_number

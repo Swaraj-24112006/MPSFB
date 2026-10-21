@@ -18,6 +18,8 @@ export interface BackendStockItem {
   upload_batch_id?: number;
   created_at?: string;
   updated_at?: string;
+  stock_date?: string;
+  stockDate?: string;
   // CamelCase aliases from serializer
   partNumber?: string;
   materialDescription?: string;
@@ -53,6 +55,7 @@ export function mapBackendStockToFrontend(item: BackendStockItem): StockReportIt
     uom: item.uom || 'PC',
     safetyStock: Number(item.safetyStock ?? item.safety_stock) || 0,
     plant: item.plant || '1001',
+    stockDate: item.stockDate || item.stock_date,
     lastUpdated: item.lastUpdated || (item.updated_at ? item.updated_at.slice(0, 10) : new Date().toISOString().slice(0, 10))
   };
 }
@@ -68,6 +71,7 @@ export const stockService = {
     below_safety_stock?: boolean;
     search?: string;
     paginate?: boolean;
+    stock_date?: string;
   }): Promise<StockReportItem[]> {
     const query: Record<string, string> = {};
     if (params?.paginate === false || params?.paginate === undefined) {
@@ -78,6 +82,7 @@ export const stockService = {
     if (params?.material_type) query.material_type = params.material_type;
     if (params?.part_number) query.part_number = params.part_number;
     if (params?.storage_location) query.storage_location = params.storage_location;
+    if (params?.stock_date) query.stock_date = params.stock_date;
     if (params?.below_safety_stock) query.below_safety_stock = 'true';
     if (params?.search) query.search = params.search;
 
@@ -116,17 +121,22 @@ export const stockService = {
     file?: File;
     csv_text?: string;
     mode?: 'replace' | 'append';
+    opening_stock_date?: string;
   }): Promise<StockUploadResponse> {
     const mode = content.mode || 'replace';
     if (content.file) {
       const formData = new FormData();
       formData.append('file', content.file);
       formData.append('mode', mode);
+      if (content.opening_stock_date) {
+        formData.append('opening_stock_date', content.opening_stock_date);
+      }
       return api.upload<StockUploadResponse>('/uploads/stock-report/', formData);
     } else {
       return api.post<StockUploadResponse>('/uploads/stock-report/', {
         csv_text: content.csv_text || '',
-        mode
+        mode,
+        opening_stock_date: content.opening_stock_date
       });
     }
   },

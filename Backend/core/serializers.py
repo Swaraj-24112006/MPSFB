@@ -705,6 +705,7 @@ class StockReportSerializer(serializers.ModelSerializer):
             'uom',
             'safety_stock',
             'plant',
+            'stock_date',
             'total_stock',
             'is_below_safety_stock',
             'upload_batch_id',
@@ -731,6 +732,7 @@ class StockReportSerializer(serializers.ModelSerializer):
             'inQualityInsp': 'in_quality_insp',
             'storageLocation': 'storage_location',
             'safetyStock': 'safety_stock',
+            'stockDate': 'stock_date',
         }
         for camel, snake in camel_to_snake.items():
             if camel in normalized and snake not in normalized:
@@ -783,6 +785,7 @@ class StockReportSerializer(serializers.ModelSerializer):
         ret['safetyStock'] = float(instance.safety_stock)
         ret['totalStock'] = float(instance.total_stock)
         ret['isBelowSafetyStock'] = instance.is_below_safety_stock
+        ret['stockDate'] = instance.stock_date.isoformat() if instance.stock_date else None
         ret['lastUpdated'] = instance.updated_at.strftime('%Y-%m-%d %H:%M') if instance.updated_at else ''
         return ret
 

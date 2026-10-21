@@ -556,6 +556,12 @@ class StockReport(models.Model):
         default='1001',
         help_text="Plant code (default 1001)"
     )
+    stock_date = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Opening Stock Baseline Snapshot Date (e.g. 2026-10-04)"
+    )
     upload_batch = models.ForeignKey(
         UploadBatch,
         null=True,

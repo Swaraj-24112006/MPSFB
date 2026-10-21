@@ -2,6 +2,9 @@
 
 This directory contains cohesive sample CSV datasets designed for end-to-end testing of the Master Production Schedule (MPS) and Monday Review Cockpit.
 
+> 📖 **Comprehensive Verification & Actions Guide:**  
+> For the complete breakdown of exact output numbers and an in-depth dictionary of all interactive actions (e.g. **Freeze Plan**, **Auto-Freeze**, **Escalations**, **Heatmap**, etc.), see [**`Monday_Review_Cockpit_Data_Guide.md`**](../Monday_Review_Cockpit_Data_Guide.md).
+
 ---
 
 ## 🏭 Manufacturing Scenario Overview
@@ -80,6 +83,8 @@ This directory contains cohesive sample CSV datasets designed for end-to-end tes
 - **File to Upload:** `05_SAP_MB52_Stock_Report.csv`
 - **What Happens:**
   - Establishes current unrestricted on-hand stock and quality inspection stock.
+  - Attaches the **Opening Stock Baseline Date** (`2026-08-08` / Monday Week 2 start).
+  - **Double-Counting Protection:** Transactions prior to this baseline date are recognized as already counted inside the physical stock snapshot and will not double-adjust rolling inventory.
   - Highlights acute deficit on Common Rotor `100202` (Stock: 800 vs Required: 5,000).
 
 ---

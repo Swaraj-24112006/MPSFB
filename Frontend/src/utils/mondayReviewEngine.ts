@@ -38,7 +38,8 @@ export function computeMondayReviewCockpit(
   stockList: StockReportItem[],
   vendorDeliverySchedules: VendorDeliverySchedule[],
   mondayReviewActions: MondayReviewActionItem[],
-  planFreezeList: FGPlanFreezeItem[] = []
+  planFreezeList: FGPlanFreezeItem[] = [],
+  openingStockDate?: string
 ): {
   cockpitItems: FGWeekProductionCockpitItem[];
   selectedWeek: WeekDefinition;
@@ -241,6 +242,7 @@ export function computeMondayReviewCockpit(
     const explodedBOM: ExplodedBOMComponentSummary[] = fgBOMItems.map((bom) => {
       // Stock Report (MB52)
       const stockItem = stockList.find((s) => s.partNumber === bom.componentCode);
+      const effectiveOpeningDate = openingStockDate || (stockItem ? stockItem.stockDate : undefined);
       const totalPhysicalStock = stockItem ? stockItem.unrestrictedStock : 0;
       const safetyStock = stockItem ? stockItem.safetyStock : 500;
 
@@ -368,7 +370,13 @@ export function computeMondayReviewCockpit(
 
         const scheduledInward = weekDeliveries.reduce((sum, s) => sum + s.promisedQty, 0);
 
-        rollingCompStock = rollingCompStock + scheduledInward - grossReq;
+        // Opening stock date aware rolling stock:
+        // If week is strictly before effectiveOpeningDate, past consumption/receipts already occurred prior to snapshot.
+        if (effectiveOpeningDate && w.endDate < effectiveOpeningDate) {
+          // Historical week prior to opening stock snapshot — do not adjust rolling stock
+        } else {
+          rollingCompStock = rollingCompStock + scheduledInward - grossReq;
+        }
         const deficit = rollingCompStock < 0 ? rollingCompStock : 0;
 
         let status: 'ADEQUATE' | 'INADEQUATE' | 'CRITICAL_NO_DELIVERY' | 'EXCESS' = 'ADEQUATE';
